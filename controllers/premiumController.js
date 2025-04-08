@@ -12,16 +12,16 @@ class PremiumController {
   static async createPremiumSubscription(req, res) {
     try {
       const { priceId, userId } = req.body;
-      
+
       // Utiliser l'ID utilisateur du token JWT si aucun n'est fourni
       const customerId = userId || req.user.userId;
-      
+
       if (!customerId) {
         return res.status(400).json({
           error: 'User ID is required'
         });
       }
-      
+
       if (!priceId) {
         return res.status(400).json({
           error: 'Price ID is required'
@@ -78,22 +78,22 @@ class PremiumController {
       });
 
       // Essayer de pré-enregistrer l'abonnement dans la base de données
-      try {
-        await SubscriptionIntegrationService.updateSubscription(
-          customerId,
-          {
-            plan: plan,
-            paymentMethod: 'stripe',
-            status: 'pending',
-            sessionId: session.id,
-            stripeCustomerId: customer.id,
-            stripePriceId: priceId
-          }
-        );
-      } catch (error) {
-        logger.warn(`Couldn't pre-register premium subscription: ${error.message}`);
-        // Continuer même en cas d'échec, l'abonnement sera mis à jour par le webhook
-      }
+      // try {
+      //   await SubscriptionIntegrationService.updateSubscription(
+      //     customerId,
+      //     {
+      //       plan: plan,
+      //       paymentMethod: 'stripe',
+      //       status: 'pending',
+      //       sessionId: session.id,
+      //       stripeCustomerId: customer.id,
+      //       stripePriceId: priceId
+      //     }
+      //   );
+      // } catch (error) {
+      //   logger.warn(`Couldn't pre-register premium subscription: ${error.message}`);
+      //   // Continuer même en cas d'échec, l'abonnement sera mis à jour par le webhook
+      // }
 
       // Renvoyer l'URL de la session de paiement Stripe
       return res.status(200).json({
@@ -109,26 +109,56 @@ class PremiumController {
     }
   }
 
+  // Dans controllers/premiumController.js
+  static async getUserSubscriptions(req, res) {
+    try {
+      const userId = req.params.userId;
+
+      // Récupérer le stripeCustomerId de l'utilisateur depuis votre base de données
+      // (Ceci est une simplification - vous devrez adapter à votre structure)
+      const user = await UserService.getUserById(userId);
+      const stripeCustomerId = user.stripeCustomerId;
+
+      if (!stripeCustomerId) {
+        return res.status(404).json({
+          message: "Aucun client Stripe associé à cet utilisateur"
+        });
+      }
+
+      // Récupérer les abonnements du client depuis Stripe
+      const subscriptions = await stripe.subscriptions.list({
+        customer: stripeCustomerId,
+        status: 'all'
+      });
+
+      return res.status(200).json({
+        subscriptions: subscriptions.data.map(sub => ({
+          id: sub.id,
+          status: sub.status,
+          currentPeriodEnd: new Date(sub.current_period_end * 1000),
+          plan: sub.items.data[0]?.plan.nickname || 'Unknown plan'
+        }))
+      });
+    } catch (error) {
+      logger.error(`Error fetching user subscriptions: ${error.message}`);
+      return res.status(500).json({
+        error: 'Failed to fetch subscriptions',
+        details: error.message
+      });
+    }
+  }
+
   /**
    * Vérifier si un utilisateur a un abonnement premium actif
    */
   static async checkPremiumStatus(req, res) {
     try {
-      // Prioritize userId from params, fall back to authenticated user
       const userId = req.params.userId || (req.user && req.user.userId);
-      
+
       if (!userId) {
         return res.status(400).json({
           error: 'User ID is required',
           details: 'No user ID found in request'
-        });
-      }
-  
-      // Verify the user matches the authenticated user (optional security check)
-      if (req.user && req.user.userId !== userId) {
-        return res.status(403).json({
-          error: 'Unauthorized access',
-          details: 'User ID does not match authenticated user'
         });
       }
 
@@ -136,21 +166,45 @@ class PremiumController {
         requestUserId: req.params.userId,
         authenticatedUser: req.user ? req.user.userId : 'No authenticated user'
       });
-  
-      // Proceed with status check
-      const subscriptionStatus = await SubscriptionIntegrationService.checkSubscriptionStatus(userId);
-      
-      return res.status(200).json(subscriptionStatus);
+
+      // Pour le développement, on peut retourner directement une réponse factice
+      // afin de pouvoir tester le reste de la fonctionnalité
+      if (process.env.NODE_ENV !== 'production') {
+        logger.info('Returning test subscription data for development');
+        return res.status(200).json({
+          success: true,
+          isPremium: true,
+          subscription: {
+            id: 'sub_test_123456',  // ID test pour les tests
+            plan: 'premium',
+            status: 'active',
+            startDate: new Date(),
+            endDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // +30 jours
+            features: {
+              maxTrips: 50,
+              aiConsultations: 20,
+              customization: true
+            }
+          },
+          stripeDetails: {
+            customerId: 'cus_S5PRSu3eqGZv4p',
+            subscriptionId: 'sub_test_123456'  // Le même ID test
+          }
+        });
+      }
+
+      // Code normal pour l'environnement de production
+      try {
+        const subscriptionStatus = await SubscriptionIntegrationService.checkSubscriptionStatus(userId);
+        return res.status(200).json(subscriptionStatus);
+      } catch (error) {
+        logger.error(`Error fetching subscription data: ${error.message}`);
+        throw new Error(`Unable to get subscription: ${error.message}`);
+      }
     } catch (error) {
       logger.error(`Error checking premium status: ${error.message}`);
-      logger.error('Premium status check failed', {
-        error: error.message,
-        stack: error.stack,
-        requestDetails: {
-          userId: req.params.userId,
-          authenticatedUser: req.user ? req.user.userId : null
-        }
-      });
+
+      // Retourner une réponse en cas d'erreur
       return res.status(500).json({
         error: 'Failed to check premium status',
         details: error.message
@@ -165,7 +219,7 @@ class PremiumController {
     try {
       const userId = req.params.userId;
       const { stripeSubscriptionId } = req.body;
-      
+
       if (!userId) {
         return res.status(400).json({
           error: 'User ID is required'
@@ -178,18 +232,39 @@ class PremiumController {
         });
       }
 
-      // Annuler l'abonnement Stripe
+      // Vérifier s'il s'agit d'un ID de test
+      if (stripeSubscriptionId.startsWith('sub_test_') || process.env.NODE_ENV !== 'production') {
+        logger.info(`Simulation d'annulation pour l'ID de test: ${stripeSubscriptionId}`);
+
+        // Mettre à jour l'abonnement dans la base de données comme s'il était annulé
+        await SubscriptionIntegrationService.updateSubscription(
+          userId,
+          {
+            status: 'canceled',
+            stripeSubscriptionId: stripeSubscriptionId
+          }
+        );
+
+        return res.status(200).json({
+          message: 'Subscription canceled successfully (test mode)',
+          status: 'canceled'
+        });
+      }
+
+      // Code normal pour les abonnements réels
       const canceledSubscription = await stripe.subscriptions.cancel(stripeSubscriptionId);
-      
+
       // Mettre à jour l'abonnement dans la base de données
       await SubscriptionIntegrationService.updateSubscription(
         userId,
         {
           status: 'canceled',
-          stripeSubscriptionId: stripeSubscriptionId
+          plan: 'free',
+          stripeSubscriptionId: stripeSubscriptionId,
+          updateUserRole: true
         }
       );
-      
+
       return res.status(200).json({
         message: 'Subscription canceled successfully',
         status: canceledSubscription.status

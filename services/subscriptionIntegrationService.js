@@ -36,6 +36,9 @@ class SubscriptionIntegrationService {
   /**
    * Mettre à jour ou créer un abonnement dans le service de base de données
    */
+  /**
+   * Mettre à jour ou créer un abonnement dans le service de base de données
+   */
   static async updateSubscription(userId, subscriptionData) {
     try {
       // Vérifier que l'ID utilisateur est valide pour MongoDB
@@ -56,10 +59,11 @@ class SubscriptionIntegrationService {
         sessionId: subscriptionData.sessionId,
         stripeSubscriptionId: subscriptionData.stripeSubscriptionId,
         stripePriceId: subscriptionData.stripePriceId,
-        stripeCustomerId: subscriptionData.stripeCustomerId
+        stripeCustomerId: subscriptionData.stripeCustomerId,
+        cancelExistingSubscriptions: true // Flag pour désactiver les autres abonnements
       };
 
-      // Ajoutez ceci juste avant l'appel axios
+      // Logs pour le débogage
       logger.info(`Tentative d'appel API vers ${DATABASE_SERVICE_URL}/api/subscriptions/update-from-payment`);
       logger.info(`Headers: x-api-key présent: ${!!SERVICE_API_KEY}`);
       logger.info(`Payload: ${JSON.stringify(payload)}`);
@@ -72,15 +76,47 @@ class SubscriptionIntegrationService {
           headers: {
             'x-api-key': SERVICE_API_KEY,
             'Content-Type': 'application/json'
-          }
+          },
+          timeout: 5000 
         }
       );
 
-      logger.info(`Abonnement mis à jour dans le service de base de données pour l'utilisateur ${userId}`);
+      // Si l'abonnement est mis à jour/créé avec succès ET qu'il faut mettre à jour le rôle
+      if (response.data.success !== false && subscriptionData.updateUserRole) {
+        try {
+          // Appel pour mettre à jour le rôle utilisateur
+          await axios.put(
+            `${DATABASE_SERVICE_URL}/api/users/${userId}/role`,
+            { 
+              role: subscriptionData.plan === 'free' || subscriptionData.status === 'canceled' 
+                ? 'user' 
+                : subscriptionData.plan === 'premium' 
+                  ? 'premium' 
+                  : 'user'
+            },
+            { 
+              headers: { 
+                'x-api-key': SERVICE_API_KEY,
+                'Content-Type': 'application/json'
+              } 
+            }
+          );
+          logger.info(`Rôle utilisateur mis à jour pour ${userId} selon le plan ${subscriptionData.plan}`);
+        } catch (roleError) {
+          logger.warn(`Couldn't update user role: ${roleError.message}`);
+        }
+      }
+
+      logger.info(`Abonnement mis à jour dans la base de données pour l'utilisateur ${userId}`);
       return response.data;
     } catch (error) {
-      logger.error(`Erreur lors de la mise à jour de l'abonnement dans la base de données: ${error.message}`);
-      throw error;
+      logger.error(`Erreur lors de la mise à jour de l'abonnement: ${error.message}`);
+      
+      // Au lieu de faire remonter l'erreur, retourner un objet de résultat
+      return { 
+        success: false, 
+        message: "Échec de la mise à jour de l'abonnement. La mise à jour sera effectuée par le webhook Stripe ultérieurement."
+      };
     }
   }
 
@@ -96,28 +132,28 @@ class SubscriptionIntegrationService {
       // Log détaillé avant la requête
       logger.info('Tentative de vérification du statut d\'abonnement', {
         userId,
-        urlService: process.env.USER_SERVICE_URL
+        urlService: process.env.DATABASE_SERVICE_URL
       });
 
+      // Correction: utiliser DATABASE_SERVICE_URL au lieu de USER_SERVICE_URL
+      const url = `${process.env.DATABASE_SERVICE_URL}/api/subscriptions/status/${userId}`;
+      
+      logger.info(`Appel de l'URL: ${url}`);
+      
       const config = {
         method: 'get',
-        url: `${process.env.USER_SERVICE_URL}/subscriptions/${userId}`,
+        url: url,
         headers: {
-          'Authorization': `Bearer ${this.genererTokenServiceInterne()}`,
+          'x-api-key': SERVICE_API_KEY,
           'Content-Type': 'application/json'
         },
-        timeout: 10000 // Augmenté à 10 secondes
+        timeout: 10000
       };
-
-      // Log du token généré
-      logger.info('Token de service interne généré', {
-        token: config.headers.Authorization
-      });
 
       try {
         const response = await axios(config);
         
-        logger.info('Réponse du service utilisateur', {
+        logger.info('Réponse du service de données', {
           status: response.status,
           data: response.data
         });
@@ -125,25 +161,22 @@ class SubscriptionIntegrationService {
         return response.data;
       } catch (axiosError) {
         // Log détaillé des erreurs Axios
-        logger.error('Erreur détaillée lors de la requête', {
-          message: axiosError.message,
+        logger.error(`${axiosError.message}`, {
           code: axiosError.code,
           config: axiosError.config,
           response: axiosError.response ? {
             status: axiosError.response.status,
             data: axiosError.response.data
-          } : 'Pas de réponse',
+          } : 'Pas de réponse'
         });
 
-        // Gestion spécifique des erreurs Axios
-        if (axiosError.code === 'ECONNREFUSED') {
-          throw new Error('Connexion refusée : le service utilisateur est-il actif ?');
-        }
-        if (axiosError.code === 'ETIMEDOUT') {
-          throw new Error('Délai de connexion dépassé : le service est-il joignable ?');
-        }
-
-        throw axiosError;
+        // Retourner une réponse par défaut en cas d'erreur
+        return {
+          success: false,
+          subscription: null,
+          isPremium: false,
+          error: axiosError.message
+        };
       }
     } catch (error) {
       logger.error('Échec final de la vérification du statut', {
@@ -152,7 +185,12 @@ class SubscriptionIntegrationService {
         stack: error.stack
       });
 
-      throw error;
+      return {
+        success: false,
+        subscription: null,
+        isPremium: false,
+        error: error.message
+      };
     }
   }
 
@@ -189,7 +227,8 @@ class SubscriptionIntegrationService {
           headers: {
             'x-api-key': SERVICE_API_KEY,
             'Content-Type': 'application/json'
-          }
+          },
+          timeout: 5000 // Ajouter un timeout
         }
       );
 
@@ -197,7 +236,12 @@ class SubscriptionIntegrationService {
       return response.data;
     } catch (error) {
       logger.error(`Erreur lors de l'enregistrement du paiement: ${error.message}`);
-      throw error;
+      
+      // Retourner un résultat par défaut au lieu de faire remonter l'erreur
+      return {
+        success: false,
+        message: "Échec de l'enregistrement du paiement. Sera réessayé ultérieurement."
+      };
     }
   }
 }

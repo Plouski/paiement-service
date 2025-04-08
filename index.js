@@ -7,6 +7,7 @@ const helmet = require('helmet');
 
 // Import routes
 const premiumRoutes = require('./routes/premiumRoutes');
+const webhookRoutes = require('./routes/webhookRoutes');
 
 // Initialize express app
 const app = express();
@@ -22,6 +23,7 @@ app.use(express.json());
 
 // Routes
 app.use('/premium', premiumRoutes);
+app.use('/webhooks', webhookRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
