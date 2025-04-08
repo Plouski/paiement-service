@@ -6,8 +6,7 @@ const morgan = require('morgan');
 const helmet = require('helmet');
 
 // Import routes
-const paymentRoutes = require('./routes/paymentRoutes');
-const webhookRoutes = require('./routes/webhookRoutes');
+const premiumRoutes = require('./routes/premiumRoutes');
 
 // Initialize express app
 const app = express();
@@ -22,8 +21,7 @@ app.use(morgan('combined')); // Logging
 app.use(express.json());
 
 // Routes
-app.use('/payments', paymentRoutes);
-app.use('/webhooks', webhookRoutes);
+app.use('/premium', premiumRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
