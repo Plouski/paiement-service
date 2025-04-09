@@ -1,5 +1,5 @@
 // controllers/webhookController.js
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const stripe = require('../config/stripeConfig');
 const { logger } = require('../utils/logger');
 const SubscriptionIntegrationService = require('../services/subscriptionIntegrationService');
 
@@ -23,7 +23,7 @@ class WebhookController {
     }
     
     // Traiter l'événement vérifié
-    return this.processWebhookEvent(event, res);
+    return WebhookController.processWebhookEvent(event, res);
   }
   
   /**
@@ -32,17 +32,12 @@ class WebhookController {
   static async handleStripeWebhookTest(req, res) {
     const event = req.body;
     
-    logger.info(`Test de webhook Stripe reçu: ${event.type}`);
-    
-    // Ajouter des logs détaillés pour le débogage
-    logger.info(`Contenu de l'événement test:`, {
+    logger.info(`Test de webhook Stripe reçu: ${event.type}`, {
       eventId: event.id,
       eventType: event.type,
-      object: event.data?.object?.id,
-      metadata: event.data?.object?.metadata
+      object: event.data?.object?.id
     });
     
-    // Correction: utilisez le nom de la classe au lieu de this
     return WebhookController.processWebhookEvent(event, res);
   }
   
@@ -51,25 +46,27 @@ class WebhookController {
    */
   static async processWebhookEvent(event, res) {
     try {
+      let result = null;
+
       // Traiter les différents types d'événements
       switch (event.type) {
         case 'checkout.session.completed': {
-          await this.handleCheckoutSessionCompleted(event.data.object);
+          result = await WebhookController.handleCheckoutSessionCompleted(event.data.object);
           break;
         }
         
         case 'invoice.paid': {
-          await this.handleInvoicePaid(event.data.object);
+          result = await WebhookController.handleInvoicePaid(event.data.object);
           break;
         }
         
         case 'customer.subscription.updated': {
-          await this.handleSubscriptionUpdated(event.data.object);
+          result = await WebhookController.handleSubscriptionUpdated(event.data.object);
           break;
         }
         
         case 'customer.subscription.deleted': {
-          await this.handleSubscriptionDeleted(event.data.object);
+          result = await WebhookController.handleSubscriptionDeleted(event.data.object);
           break;
         }
         
@@ -88,7 +85,11 @@ class WebhookController {
       }
       
       // Répondre à Stripe pour confirmer la réception
-      return res.json({ received: true });
+      return res.status(200).json({ 
+        received: true,
+        processed: true,
+        result
+      });
     } catch (error) {
       // Log détaillé de l'erreur mais répondre 200 quand même
       // pour éviter que Stripe ne réessaie infiniment
@@ -118,35 +119,37 @@ class WebhookController {
       
       logger.info(`Checkout réussi pour l'utilisateur ${userId}, plan ${plan}`);
       
-      // Récupérer des détails supplémentaires si nécessaire
+      // Récupérer des détails supplémentaires
       let stripePriceId = null;
       let stripeSubscriptionId = null;
       
-      // Si des informations sont manquantes, on peut faire une requête supplémentaire
-      if (session.line_items) {
-        // Déjà inclus dans l'événement
-        stripePriceId = session.line_items.data[0]?.price?.id;
-      } else if (session.subscription) {
-        // Faire une requête pour obtenir l'abonnement
-        const subscription = await stripe.subscriptions.retrieve(session.subscription);
-        stripeSubscriptionId = subscription.id;
-        stripePriceId = subscription.items.data[0]?.price?.id;
+      // Récupérer l'abonnement si nécessaire
+      if (session.subscription) {
+        try {
+          const subscription = await stripe.subscriptions.retrieve(session.subscription);
+          stripeSubscriptionId = subscription.id;
+          stripePriceId = subscription.items.data[0]?.price?.id;
+        } catch (subError) {
+          logger.warn(`Impossible de récupérer les détails de l'abonnement: ${subError.message}`);
+        }
       }
       
       // Mettre à jour l'abonnement dans la base de données
-      await SubscriptionIntegrationService.updateSubscription(userId, {
+      const result = await SubscriptionIntegrationService.updateSubscription(userId, {
         plan: plan || 'premium',
         paymentMethod: 'stripe',
         status: 'active',
         sessionId: session.id,
         stripeCustomerId: session.customer,
         stripeSubscriptionId,
-        stripePriceId
+        stripePriceId,
+        updateUserRole: true
       });
       
-      logger.info(`Abonnement activé avec succès pour l'utilisateur ${userId}`);
+      logger.info(`Abonnement activé pour l'utilisateur ${userId}: ${JSON.stringify(result)}`);
+      return result;
     } catch (error) {
-      logger.error(`Erreur lors de l'activation de l'abonnement: ${error.message}`, error);
+      logger.error(`Erreur lors de l'activation de l'abonnement: ${error.message}`);
       throw error;
     }
   }
@@ -160,16 +163,19 @@ class WebhookController {
     try {
       const customerId = invoice.customer;
       
-      // Rechercher l'utilisateur par customerId
-      const userId = await this.findUserIdByCustomerId(customerId);
+      // Rechercher l'ID utilisateur via l'API
+      const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(customerId);
       
       if (!userId) {
         logger.warn(`Aucun utilisateur trouvé pour le customer ${customerId}`);
-        return;
+        return {
+          success: false,
+          message: `Aucun utilisateur trouvé pour le customer ${customerId}`
+        };
       }
       
       // Enregistrer le paiement dans l'historique
-      await SubscriptionIntegrationService.recordSubscriptionPayment(userId, {
+      const result = await SubscriptionIntegrationService.recordSubscriptionPayment(userId, {
         amount: invoice.amount_paid / 100, // Convertir de centimes
         currency: invoice.currency,
         transactionId: invoice.id,
@@ -178,8 +184,9 @@ class WebhookController {
       });
       
       logger.info(`Paiement enregistré pour l'utilisateur ${userId}`);
+      return result;
     } catch (error) {
-      logger.error(`Erreur lors de l'enregistrement du paiement: ${error.message}`, error);
+      logger.error(`Erreur lors de l'enregistrement du paiement: ${error.message}`);
       throw error;
     }
   }
@@ -193,12 +200,15 @@ class WebhookController {
     try {
       const customerId = subscription.customer;
       
-      // Rechercher l'utilisateur par customerId
-      const userId = await this.findUserIdByCustomerId(customerId);
+      // Rechercher l'ID utilisateur via l'API
+      const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(customerId);
       
       if (!userId) {
         logger.warn(`Aucun utilisateur trouvé pour le customer ${customerId}`);
-        return;
+        return {
+          success: false,
+          message: `Aucun utilisateur trouvé pour le customer ${customerId}`
+        };
       }
       
       // Déterminer le nouveau statut
@@ -211,7 +221,7 @@ class WebhookController {
           status = 'active'; // Ou 'warning' si vous avez ce statut
           break;
         case 'unpaid':
-          status = 'suspended'; // Ou un statut équivalent
+          status = 'suspended';
           break;
         case 'canceled':
           status = 'canceled';
@@ -220,15 +230,26 @@ class WebhookController {
           status = subscription.status;
       }
       
+      // Déterminer le plan
+      const items = subscription.items.data;
+      let plan = 'premium';  // Par défaut
+      if (items && items.length > 0) {
+        const priceId = items[0].price.id;
+        plan = SubscriptionIntegrationService.getPlanFromStripePrice(priceId);
+      }
+      
       // Mettre à jour l'abonnement
-      await SubscriptionIntegrationService.updateSubscription(userId, {
+      const result = await SubscriptionIntegrationService.updateSubscription(userId, {
         status,
-        stripeSubscriptionId: subscription.id
+        plan,
+        stripeSubscriptionId: subscription.id,
+        updateUserRole: true
       });
       
       logger.info(`Statut d'abonnement mis à jour pour l'utilisateur ${userId}: ${status}`);
+      return result;
     } catch (error) {
-      logger.error(`Erreur lors de la mise à jour du statut d'abonnement: ${error.message}`, error);
+      logger.error(`Erreur lors de la mise à jour du statut d'abonnement: ${error.message}`);
       throw error;
     }
   }
@@ -242,56 +263,30 @@ class WebhookController {
     try {
       const customerId = subscription.customer;
       
-      // Rechercher l'utilisateur par customerId
-      const userId = await this.findUserIdByCustomerId(customerId);
+      // Rechercher l'ID utilisateur via l'API
+      const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(customerId);
       
       if (!userId) {
         logger.warn(`Aucun utilisateur trouvé pour le customer ${customerId}`);
-        return;
+        return {
+          success: false,
+          message: `Aucun utilisateur trouvé pour le customer ${customerId}`
+        };
       }
       
       // Mettre à jour l'abonnement comme annulé
-      await SubscriptionIntegrationService.updateSubscription(userId, {
+      const result = await SubscriptionIntegrationService.updateSubscription(userId, {
         status: 'canceled',
-        stripeSubscriptionId: subscription.id
+        plan: 'free',
+        stripeSubscriptionId: subscription.id,
+        updateUserRole: true
       });
       
       logger.info(`Abonnement marqué comme annulé pour l'utilisateur ${userId}`);
+      return result;
     } catch (error) {
-      logger.error(`Erreur lors de l'annulation de l'abonnement: ${error.message}`, error);
+      logger.error(`Erreur lors de l'annulation de l'abonnement: ${error.message}`);
       throw error;
-    }
-  }
-  
-  /**
-   * Utilitaire pour trouver l'ID utilisateur à partir d'un ID client Stripe
-   */
-  static async findUserIdByCustomerId(customerId) {
-    try {
-      // Cette méthode dépend de votre implémentation spécifique
-      // Voici un exemple de ce qu'elle pourrait faire
-      
-      // Option 1: Utiliser la méthode du service d'intégration si elle existe
-      if (typeof SubscriptionIntegrationService.getUserIdFromCustomerId === 'function') {
-        return await SubscriptionIntegrationService.getUserIdFromCustomerId(customerId);
-      }
-      
-      // Option 2: Rechercher dans les métadonnées du client Stripe
-      // Cela suppose que vous avez stocké l'ID utilisateur dans les métadonnées du client
-      const customer = await stripe.customers.retrieve(customerId);
-      if (customer && customer.metadata && customer.metadata.userId) {
-        return customer.metadata.userId;
-      }
-      
-      // Option 3: Faire une requête à votre service de base de données
-      // pour trouver un utilisateur avec ce customerId
-      // Cela dépend de votre mise en œuvre spécifique
-      
-      logger.warn(`Méthode de recherche d'utilisateur par customerId non implémentée`);
-      return null;
-    } catch (error) {
-      logger.error(`Erreur lors de la recherche de l'utilisateur par customerId: ${error.message}`, error);
-      return null;
     }
   }
 }

@@ -1,3 +1,4 @@
+// services/subscriptionIntegrationService.js
 require('dotenv').config();
 const axios = require('axios');
 const { logger } = require('../utils/logger');
@@ -10,38 +11,30 @@ const SERVICE_API_KEY = process.env.SERVICE_API_KEY;
 class SubscriptionIntegrationService {
   /**
    * Mapping des prix Stripe vers les plans d'abonnement
-   * Définissez ici vos correspondances entre les IDs de prix Stripe et vos plans d'abonnement
    */
   static getPlanFromStripePrice(priceId) {
     const priceToPlanMap = {
-      // IDs de prix Stripe actuels
       'price_1RBEbRFPUw49ncmgarXkQo25': 'premium',
       // Vous pouvez ajouter d'autres correspondances ici
     };
 
-    // Vérifier si le priceId existe dans notre mapping
     if (priceToPlanMap[priceId]) {
       return priceToPlanMap[priceId];
     }
 
-    // Si le priceId n'est pas trouvé, vérifier les préfixes génériques
+    // Vérification par préfixe
     if (priceId.includes('standard')) return 'standard';
     if (priceId.includes('premium')) return 'premium';
     if (priceId.includes('enterprise')) return 'enterprise';
 
-    // Plan par défaut si non trouvé
     return 'premium';
   }
 
   /**
    * Mettre à jour ou créer un abonnement dans le service de base de données
    */
-  /**
-   * Mettre à jour ou créer un abonnement dans le service de base de données
-   */
   static async updateSubscription(userId, subscriptionData) {
     try {
-      // Vérifier que l'ID utilisateur est valide pour MongoDB
       if (!userId) {
         throw new Error('userId est requis');
       }
@@ -60,12 +53,10 @@ class SubscriptionIntegrationService {
         stripeSubscriptionId: subscriptionData.stripeSubscriptionId,
         stripePriceId: subscriptionData.stripePriceId,
         stripeCustomerId: subscriptionData.stripeCustomerId,
-        cancelExistingSubscriptions: true // Flag pour désactiver les autres abonnements
+        cancelExistingSubscriptions: true
       };
 
-      // Logs pour le débogage
-      logger.info(`Tentative d'appel API vers ${DATABASE_SERVICE_URL}/api/subscriptions/update-from-payment`);
-      logger.info(`Headers: x-api-key présent: ${!!SERVICE_API_KEY}`);
+      logger.info(`Appel API vers ${DATABASE_SERVICE_URL}/api/subscriptions/update-from-payment`);
       logger.info(`Payload: ${JSON.stringify(payload)}`);
 
       // Appeler l'API du service de base de données
@@ -77,47 +68,59 @@ class SubscriptionIntegrationService {
             'x-api-key': SERVICE_API_KEY,
             'Content-Type': 'application/json'
           },
-          timeout: 5000 
+          timeout: 8000  // Augmenter le timeout
         }
       );
 
-      // Si l'abonnement est mis à jour/créé avec succès ET qu'il faut mettre à jour le rôle
+      // Mise à jour du rôle utilisateur si nécessaire
       if (response.data.success !== false && subscriptionData.updateUserRole) {
         try {
-          // Appel pour mettre à jour le rôle utilisateur
+          const role = this.determineUserRole(subscriptionData.plan, subscriptionData.status);
+          
           await axios.put(
             `${DATABASE_SERVICE_URL}/api/users/${userId}/role`,
-            { 
-              role: subscriptionData.plan === 'free' || subscriptionData.status === 'canceled' 
-                ? 'user' 
-                : subscriptionData.plan === 'premium' 
-                  ? 'premium' 
-                  : 'user'
-            },
+            { role },
             { 
               headers: { 
                 'x-api-key': SERVICE_API_KEY,
                 'Content-Type': 'application/json'
-              } 
+              },
+              timeout: 5000
             }
           );
-          logger.info(`Rôle utilisateur mis à jour pour ${userId} selon le plan ${subscriptionData.plan}`);
+          logger.info(`Rôle utilisateur mis à jour pour ${userId} vers ${role}`);
         } catch (roleError) {
           logger.warn(`Couldn't update user role: ${roleError.message}`);
         }
       }
 
-      logger.info(`Abonnement mis à jour dans la base de données pour l'utilisateur ${userId}`);
+      logger.info(`Abonnement mis à jour pour l'utilisateur ${userId}`);
+      logger.info(`Mise à jour d'abonnement - données entrantes:`, subscriptionData);
       return response.data;
     } catch (error) {
       logger.error(`Erreur lors de la mise à jour de l'abonnement: ${error.message}`);
       
-      // Au lieu de faire remonter l'erreur, retourner un objet de résultat
+      // Retourner un objet de résultat avec une indication d'échec
       return { 
         success: false, 
         message: "Échec de la mise à jour de l'abonnement. La mise à jour sera effectuée par le webhook Stripe ultérieurement."
       };
     }
+  }
+
+  /**
+   * Déterminer le rôle de l'utilisateur en fonction du plan et du statut
+   */
+  static determineUserRole(plan, status) {
+    if (status === 'canceled' || plan === 'free') {
+      return 'user';
+    }
+    
+    if (plan === 'premium' || plan === 'enterprise') {
+      return 'premium';
+    }
+    
+    return 'user';
   }
 
   /**
@@ -129,16 +132,9 @@ class SubscriptionIntegrationService {
         throw new Error('L\'ID utilisateur est requis');
       }
 
-      // Log détaillé avant la requête
-      logger.info('Tentative de vérification du statut d\'abonnement', {
-        userId,
-        urlService: process.env.DATABASE_SERVICE_URL
-      });
-
-      // Correction: utiliser DATABASE_SERVICE_URL au lieu de USER_SERVICE_URL
-      const url = `${process.env.DATABASE_SERVICE_URL}/api/subscriptions/status/${userId}`;
+      logger.info(`Vérification du statut d'abonnement pour l'utilisateur ${userId}`);
       
-      logger.info(`Appel de l'URL: ${url}`);
+      const url = `${DATABASE_SERVICE_URL}/api/subscriptions/status/${userId}`;
       
       const config = {
         method: 'get',
@@ -153,24 +149,32 @@ class SubscriptionIntegrationService {
       try {
         const response = await axios(config);
         
-        logger.info('Réponse du service de données', {
-          status: response.status,
-          data: response.data
-        });
-
+        logger.info(`Statut d'abonnement récupéré avec succès: ${JSON.stringify(response.data)}`);
         return response.data;
       } catch (axiosError) {
-        // Log détaillé des erreurs Axios
-        logger.error(`${axiosError.message}`, {
-          code: axiosError.code,
-          config: axiosError.config,
-          response: axiosError.response ? {
-            status: axiosError.response.status,
-            data: axiosError.response.data
-          } : 'Pas de réponse'
-        });
+        logger.error(`Erreur lors de la requête de statut d'abonnement: ${axiosError.message}`);
+        
+        // Si nous sommes en environnement de développement, retourner des données de test
+        if (process.env.NODE_ENV !== 'production') {
+          logger.info('Retour de données de test pour l\'environnement de développement');
+          return {
+            success: true,
+            isPremium: true,
+            subscription: {
+              id: 'sub_test_123456',
+              plan: 'premium',
+              status: 'active',
+              startDate: new Date(),
+              endDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+              features: {
+                maxTrips: 50,
+                aiConsultations: 20,
+                customization: true
+              }
+            }
+          };
+        }
 
-        // Retourner une réponse par défaut en cas d'erreur
         return {
           success: false,
           subscription: null,
@@ -179,11 +183,7 @@ class SubscriptionIntegrationService {
         };
       }
     } catch (error) {
-      logger.error('Échec final de la vérification du statut', {
-        userId,
-        messageErreur: error.message,
-        stack: error.stack
-      });
+      logger.error(`Échec de la vérification du statut: ${error.message}`);
 
       return {
         success: false,
@@ -194,6 +194,31 @@ class SubscriptionIntegrationService {
     }
   }
 
+  /**
+   * Obtenir l'ID utilisateur à partir de l'ID client Stripe
+   */
+  static async getUserIdFromCustomerId(customerId) {
+    try {
+      const response = await axios.get(
+        `${DATABASE_SERVICE_URL}/api/users/stripe-customer/${customerId}`,
+        {
+          headers: {
+            'x-api-key': SERVICE_API_KEY
+          },
+          timeout: 5000
+        }
+      );
+      
+      return response.data.userId;
+    } catch (error) {
+      logger.error(`Erreur lors de la récupération de l'utilisateur par customerId: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Générer un token de service interne
+   */
   static genererTokenServiceInterne() {
     return jwt.sign(
       { 
@@ -228,16 +253,15 @@ class SubscriptionIntegrationService {
             'x-api-key': SERVICE_API_KEY,
             'Content-Type': 'application/json'
           },
-          timeout: 5000 // Ajouter un timeout
+          timeout: 5000
         }
       );
 
-      logger.info(`Paiement enregistré pour l'abonnement de l'utilisateur ${userId}`);
+      logger.info(`Paiement enregistré pour l'utilisateur ${userId}`);
       return response.data;
     } catch (error) {
       logger.error(`Erreur lors de l'enregistrement du paiement: ${error.message}`);
       
-      // Retourner un résultat par défaut au lieu de faire remonter l'erreur
       return {
         success: false,
         message: "Échec de l'enregistrement du paiement. Sera réessayé ultérieurement."
