@@ -17,7 +17,7 @@ const SubscriptionIntegrationService = {
     }
 
     logger.info('[✅] Subscription créée ou mise à jour', {
-      userId,
+      userId: objectId,
       stripeCustomerId: data.stripeCustomerId,
       plan: data.plan
     });
@@ -76,6 +76,32 @@ const SubscriptionIntegrationService = {
       default:
         return 'premium';
     }
+  },
+
+  async getCurrentSubscription(userId) {
+    const subscription = await Subscription.findOne({
+      userId: new mongoose.Types.ObjectId(userId),
+      isActive: true
+    });
+
+    return subscription;
+  },
+
+  async cancel(userId) {
+    const subscription = await Subscription.findOne({ userId, status: 'active' });
+
+    if (!subscription) {
+      throw new Error("Aucun abonnement actif à annuler.");
+    }
+
+    subscription.status = 'cancelled';
+    subscription.endDate = new Date();
+    await subscription.save();
+
+    // Optionnel : rétrograder le rôle de l'utilisateur si souhaité
+    await User.findByIdAndUpdate(userId, { role: 'user' });
+
+    return subscription;
   }
 };
 

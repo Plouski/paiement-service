@@ -1,13 +1,13 @@
 // payment-service/index.js
 require('dotenv').config();
-require('./services/metricRetryService');
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const helmet = require('helmet');
-const { logger, stream } = require('./utils/logger');
 const path = require('path');
 const fs = require('fs');
+const { logger, stream } = require('./utils/logger');
+const connectToDatabase = require('./config/db');
 
 // Créer le dossier de logs s'il n'existe pas
 const logsDir = path.join(__dirname, 'logs');
@@ -15,11 +15,14 @@ if (!fs.existsSync(logsDir)) {
   fs.mkdirSync(logsDir);
 }
 
-// Import routes
-const premiumRoutes = require('./routes/premiumRoutes');
-const webhookRoutes = require('./routes/webhookRoutes');
+// Connexion à la base de données MongoDB
+connectToDatabase();
 
-// Initialize express app
+// Import des routes
+const subscriptionRoutes = require('./routes/subscriptionRoutes');
+const stripeWebhookRoutes = require('./routes/stripeWebhookRoutes');
+
+// Initialiser express
 const app = express();
 const PORT = process.env.PORT || 5004;
 
@@ -30,7 +33,6 @@ const allowedOrigins = process.env.CORS_ORIGINS
 
 const corsOptions = {
   origin: function (origin, callback) {
-    // Permettre les requêtes sans origine (comme les appels API)
     if (!origin || allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
@@ -41,31 +43,25 @@ const corsOptions = {
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
   credentials: true,
-  maxAge: 86400 // 24 heures
+  maxAge: 86400
 };
 
-// Middlewares de sécurité
+// Middlewares
 app.use(helmet({
   contentSecurityPolicy: process.env.NODE_ENV === 'production' ? undefined : false
 }));
 app.use(cors(corsOptions));
-
-// Logging
 app.use(morgan('combined', { stream }));
 
-// IMPORTANT: Ne pas utiliser le body parser global
-// car il interfère avec le webhook Stripe qui a besoin du body brut
-// Le body parser est appliqué sélectivement dans les routes
-
-// Appliquer le body parser pour les routes régulières, mais pas pour /webhooks/stripe
+// Appliquer le body parser uniquement pour les routes sauf Stripe Webhook
 app.use(/^(?!\/webhooks\/stripe).+/, express.json({ limit: '1mb' }));
 app.use(/^(?!\/webhooks\/stripe).+/, express.urlencoded({ extended: true }));
 
-// Routes with their specific middlewares
-app.use('/premium', premiumRoutes);
-app.use('/webhooks', webhookRoutes);
+// Routes
+app.use('/subscription', subscriptionRoutes);
+app.use('/webhooks', stripeWebhookRoutes);
 
-// Health check endpoint
+// Endpoint de santé
 app.get('/health', (req, res) => {
   res.status(200).json({ 
     status: 'ok',
@@ -75,7 +71,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-// 404 handler
+// Gestion des erreurs 404
 app.use((req, res, next) => {
   res.status(404).json({
     error: {
@@ -86,10 +82,10 @@ app.use((req, res, next) => {
   });
 });
 
-// Error handling middleware
+// Middleware de gestion des erreurs
 app.use((err, req, res, next) => {
   logger.error(`Erreur non gérée: ${err.stack}`);
-  
+
   const statusCode = err.statusCode || 500;
   const errorResponse = {
     error: {
@@ -98,17 +94,17 @@ app.use((err, req, res, next) => {
       ...(process.env.NODE_ENV !== 'production' && { stack: err.stack })
     }
   };
-  
+
   res.status(statusCode).json(errorResponse);
 });
 
-// Start the server
+// Lancer le serveur
 const server = app.listen(PORT, () => {
-  logger.info(`Payment service running on port ${PORT}`);
-  logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  logger.info(`✅ Payment service running on port ${PORT}`);
+  logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
 });
 
-// Graceful shutdown
+// Arrêt propre
 process.on('SIGTERM', () => {
   logger.info('SIGTERM signal received: closing HTTP server');
   server.close(() => {
