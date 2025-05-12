@@ -1,27 +1,26 @@
-FROM node:18-alpine
+# Choisir une image Node stable
+FROM node:20
 
-# Create app directory
-WORKDIR /usr/src/app
+# Créer un dossier de travail
+WORKDIR /app
 
-# Install app dependencies
-# Use wildcard to copy both package.json AND package-lock.json
+# Copier les fichiers package.json et package-lock.json
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Fixer les problèmes de connexion NPM dans Docker
+RUN npm config set registry https://registry.npmjs.org/
 
-# Create log directory
-RUN mkdir -p logs
+# Installer nodemon globalement (dev tools)
+RUN npm install -g nodemon
 
-# Bundle app source
+# Installer les dépendances du projet
+RUN npm install
+
+# Copier tout le code source
 COPY . .
 
-# Set environment variables
-ENV NODE_ENV=production
-ENV PORT=5004
-
-# Expose the service port
+# Exposer le port par défaut (à adapter si nécessaire)
 EXPOSE 5004
 
-# Run the service
-CMD ["node", "index.js"]
+# Lancer le service
+CMD ["npm", "run", "dev"]

@@ -1,4 +1,3 @@
-// payment-service/index.js
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -8,6 +7,8 @@ const path = require('path');
 const fs = require('fs');
 const { logger, stream } = require('./utils/logger');
 const connectToDatabase = require('./config/db');
+const { httpRequestsTotal, httpDurationHistogram } = require('./services/metricsServices');
+const metricsRoutes = require('./routes/metricsRoutes');
 
 // Créer le dossier de logs s'il n'existe pas
 const logsDir = path.join(__dirname, 'logs');
@@ -18,15 +19,11 @@ if (!fs.existsSync(logsDir)) {
 // Connexion à la base de données MongoDB
 connectToDatabase();
 
-// Import des routes
-const subscriptionRoutes = require('./routes/subscriptionRoutes');
-const stripeWebhookRoutes = require('./routes/stripeWebhookRoutes');
-
 // Initialiser express
 const app = express();
 const PORT = process.env.PORT || 5004;
 
-// Configurer les origines CORS autorisées
+// ───────────── CORS ─────────────
 const allowedOrigins = process.env.CORS_ORIGINS 
   ? process.env.CORS_ORIGINS.split(',') 
   : ['http://localhost:3000'];
@@ -43,81 +40,97 @@ const corsOptions = {
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
   credentials: true,
-  maxAge: 86400
+  maxAge: 86400,
 };
 
-// Middlewares
-app.use(helmet({
-  contentSecurityPolicy: process.env.NODE_ENV === 'production' ? undefined : false
-}));
+// ───────────── Middlewares globaux ─────────────
+app.use(helmet({ contentSecurityPolicy: process.env.NODE_ENV === 'production' ? undefined : false }));
 app.use(cors(corsOptions));
 app.use(morgan('combined', { stream }));
 
-// Appliquer le body parser uniquement pour les routes sauf Stripe Webhook
+// ───────────── Metrics Middleware ─────────────
+app.use((req, res, next) => {
+  const start = process.hrtime();
+
+  res.on('finish', () => {
+    const duration = process.hrtime(start);
+    const seconds = duration[0] + duration[1] / 1e9;
+
+    httpRequestsTotal.inc({
+      method: req.method,
+      route: req.route ? req.route.path : req.path,
+      status_code: res.statusCode,
+    });
+
+    httpDurationHistogram.observe({
+      method: req.method,
+      route: req.route ? req.route.path : req.path,
+      status_code: res.statusCode,
+    }, seconds);
+  });
+
+  next();
+});
+
+// ───────────── Body parser ─────────────
 app.use(/^(?!\/webhooks\/stripe).+/, express.json({ limit: '1mb' }));
 app.use(/^(?!\/webhooks\/stripe).+/, express.urlencoded({ extended: true }));
 
-// Routes
+// ───────────── Routes ─────────────
+const subscriptionRoutes = require('./routes/subscriptionRoutes');
+const stripeWebhookRoutes = require('./routes/stripeWebhookRoutes');
 app.use('/subscription', subscriptionRoutes);
 app.use('/webhooks', stripeWebhookRoutes);
+app.use('/metrics', metricsRoutes);
 
-// Endpoint de santé
+// ───────────── Endpoint de santé ─────────────
 app.get('/health', (req, res) => {
   res.status(200).json({ 
     status: 'ok',
     service: 'payment-service',
     version: process.env.npm_package_version || '1.0.0',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 });
 
-// Gestion des erreurs 404
-app.use((req, res, next) => {
+// ───────────── 404 & gestion des erreurs ─────────────
+app.use((req, res) => {
   res.status(404).json({
     error: {
       message: 'Endpoint not found',
       path: req.path,
-      method: req.method
-    }
+      method: req.method,
+    },
   });
 });
 
-// Middleware de gestion des erreurs
 app.use((err, req, res, next) => {
   logger.error(`Erreur non gérée: ${err.stack}`);
-
   const statusCode = err.statusCode || 500;
   const errorResponse = {
     error: {
       message: err.message || 'Internal Server Error',
       code: err.code || 'INTERNAL_ERROR',
-      ...(process.env.NODE_ENV !== 'production' && { stack: err.stack })
-    }
+      ...(process.env.NODE_ENV !== 'production' && { stack: err.stack }),
+    },
   };
-
   res.status(statusCode).json(errorResponse);
 });
 
-// Lancer le serveur
+// ───────────── Lancer le serveur ─────────────
 const server = app.listen(PORT, () => {
   logger.info(`✅ Payment service running on port ${PORT}`);
   logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
 });
 
-// Arrêt propre
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM signal received: closing HTTP server');
-  server.close(() => {
-    logger.info('HTTP server closed');
-    process.exit(0);
-  });
-});
-
-process.on('SIGINT', () => {
-  logger.info('SIGINT signal received: closing HTTP server');
-  server.close(() => {
-    logger.info('HTTP server closed');
-    process.exit(0);
+// ───────────── Arrêt propre ─────────────
+['SIGTERM', 'SIGINT'].forEach(signal => {
+  process.on(signal, () => {
+    logger.info(`${signal} signal received: closing HTTP server`);
+    server.close(() => {
+      logger.info('HTTP server closed');
+      process.exit(0);
+    });
   });
 });
 
