@@ -1,44 +1,79 @@
-const subscriptionService = require("../services/subscriptionService.js");
+const subscriptionIntegrationService = require("../services/subscriptionIntegrationService.js");
 const Stripe = require("stripe");
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 class subscriptionController {
-    static async getCurrent(req, res) {
-        const subscription = await subscriptionService.getCurrentSubscription(req.user.id);
-        if (!subscription) return res.status(404).json({ message: "Aucun abonnement actif trouvé." });
-        res.json(subscription);
+    static async getCurrentSubscription(req, res) {
+        try {
+            const userId = req.user?.userId || req.user?.id;
+            if (!userId) return res.status(401).json({ message: "Utilisateur non authentifié." });
+
+            const subscription = await subscriptionIntegrationService.getCurrentSubscription(userId);
+
+            if (!subscription) {
+                return res.status(404).json({ message: "Aucun abonnement actif trouvé." });
+            }
+
+            res.json(subscription);
+        } catch (error) {
+            console.error("❌ Erreur getCurrentSubscription:", error);
+            res.status(500).json({ message: "Erreur serveur." });
+        }
     }
 
-    static async getStatus(req, res) {
-        const result = await subscriptionService.getStatus(req.params.userId);
-        res.json(result);
-    }
+    static async getUserSubscription(req, res) {
+        const userId = req.params.userId;
+        const requesterId = req.user?.userId || req.user?.id;
 
-    static async update(req, res) {
-        const subscription = await subscriptionService.update(req.user.id, req.body);
-        res.json(subscription);
+        if (req.user.role !== "admin" && requesterId !== userId) {
+            return res.status(403).json({ message: "Accès interdit" });
+        }
+
+        try {
+            const subscription = await subscriptionIntegrationService.getCurrentSubscription(userId);
+
+            if (!subscription) {
+                return res.status(404).json({ message: "Aucun abonnement actif trouvé." });
+            }
+
+            res.json(subscription);
+        } catch (error) {
+            console.error("❌ Erreur getUserSubscription:", error);
+            res.status(500).json({ message: "Erreur serveur." });
+        }
     }
 
     static async cancel(req, res) {
         try {
-            const result = await subscriptionService.cancel(req.user.userId);
+            const userId = req.user?.userId || req.user?.id;
+            if (!userId) return res.status(401).json({ error: "Utilisateur non authentifié" });
+
+            const result = await subscriptionIntegrationService.cancelSubscription(userId);
             res.json({ success: true, subscription: result });
         } catch (err) {
-            console.error('Erreur annulation abonnement:', err);
-            res.status(500).json({ error: 'Erreur lors de l\'annulation de l\'abonnement' });
+            console.error("❌ Erreur annulation abonnement:", err);
+            res.status(500).json({ error: "Erreur lors de l'annulation de l'abonnement" });
         }
     }
 
-    static async getHistory(req, res) {
-        const { page = 1, limit = 10, status } = req.query;
-        const result = await subscriptionService.getHistory(req.user.id, limit, page, status);
-        res.json(result);
-    }
-
-    static async getFeatures(req, res) {
-        const result = await subscriptionService.getFeatures(req.user.id);
-        res.json(result);
-    }
+    // static async update(req, res) {
+    //     try {
+    //       const userId = req.user?.userId || req.user?.id;
+    //       if (!userId) return res.status(401).json({ error: "Utilisateur non authentifié." });
+      
+    //       const updatedSubscription = await subscriptionIntegrationService.updateSubscription(userId, req.body);
+      
+    //       if (!updatedSubscription) {
+    //         return res.status(404).json({ error: "Abonnement introuvable ou non mis à jour." });
+    //       }
+      
+    //       res.json(updatedSubscription);
+    //     } catch (error) {
+    //       console.error("❌ Erreur update abonnement:", error);
+    //       res.status(500).json({ error: "Erreur lors de la mise à jour de l'abonnement." });
+    //     }
+    //   }
+      
 
     static async createCheckoutSession(req, res) {
         try {
@@ -57,7 +92,7 @@ class subscriptionController {
                 return res.status(500).json({ error: "Price ID non défini dans les variables d'environnement" });
             }
 
-            const userId = user.userId || user.id;
+            const userId = user?.userId || user?.id;
             if (!userId) {
                 return res.status(400).json({ error: "ID utilisateur manquant dans le token JWT" });
             }
@@ -73,7 +108,7 @@ class subscriptionController {
                     quantity: 1
                 }],
                 metadata: {
-                    userId: userId,
+                    userId,
                     plan
                 },
                 success_url: `${process.env.CLIENT_URL}/premium/success`,
@@ -83,29 +118,8 @@ class subscriptionController {
             res.status(200).json({ url: session.url });
 
         } catch (error) {
-            console.error("Erreur Checkout Stripe:", error);
+            console.error("❌ Erreur Checkout Stripe:", error);
             res.status(500).json({ error: "Erreur lors de la création de la session Stripe" });
-        }
-    }
-
-    static async getUserSubscription(req, res) {
-        const userId = req.params.userId;
-
-        if (req.user.role !== "admin" && req.user.userId !== userId) {
-            return res.status(403).json({ message: "Accès interdit" });
-        }
-
-        try {
-            const subscription = await subscriptionService.getCurrentSubscription(userId);
-
-            if (!subscription) {
-                return res.status(404).json({ message: "Aucun abonnement actif trouvé." });
-            }
-
-            res.json(subscription);
-        } catch (error) {
-            console.error("❌ Erreur getUserSubscription:", error);
-            res.status(500).json({ message: "Erreur serveur." });
         }
     }
 }

@@ -9,6 +9,7 @@ const { logger, stream } = require('./utils/logger');
 const connectToDatabase = require('./config/db');
 const { httpRequestsTotal, httpDurationHistogram } = require('./services/metricsServices');
 const metricsRoutes = require('./routes/metricsRoutes');
+const WebhookController = require('./controllers/webhookController');
 
 // Créer le dossier de logs s'il n'existe pas
 const logsDir = path.join(__dirname, 'logs');
@@ -22,6 +23,12 @@ connectToDatabase();
 // Initialiser express
 const app = express();
 const PORT = process.env.PORT || 5004;
+
+app.post(
+  '/webhook',
+  express.raw({ type: 'application/json' }),
+  WebhookController.handleStripeWebhook
+);
 
 // ───────────── CORS ─────────────
 const allowedOrigins = process.env.CORS_ORIGINS 
