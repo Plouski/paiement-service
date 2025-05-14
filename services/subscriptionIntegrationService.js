@@ -1,4 +1,3 @@
-// services/subscriptionIntegrationService.js
 const Subscription = require('../models/Subscription');
 const User = require('../models/User');
 const { logger } = require('../utils/logger');
@@ -6,23 +5,31 @@ const mongoose = require('mongoose');
 
 const SubscriptionIntegrationService = {
   async updateSubscription(userId, data) {
-    logger.info(`[🔄] SubscriptionIntegrationService.updateSubscription called`, { userId, data });
+    logger.info("[🔄] updateSubscription", { userId, data });
 
     const objectId = typeof userId === 'string' ? new mongoose.Types.ObjectId(userId) : userId;
 
-    if (data.updateUserRole && data.status === 'active') {
-      await User.findByIdAndUpdate(objectId, { role: 'premium' });
-    } else if (data.updateUserRole && data.status === 'canceled') {
-      await User.findByIdAndUpdate(objectId, { role: 'user' });
+    // ✅ Mise à jour du rôle utilisateur si demandé
+    if (data.updateUserRole === true) {
+      if (data.status === 'active') {
+        await User.findByIdAndUpdate(objectId, { role: 'premium' });
+        logger.info(`[👤] Rôle mis à jour → premium pour l'utilisateur ${objectId}`);
+      } else if (data.status === 'canceled') {
+        await User.findByIdAndUpdate(objectId, { role: 'user' });
+        logger.info(`[👤] Rôle mis à jour → user pour l'utilisateur ${objectId}`);
+      }
     }
 
-    logger.info('[✅] Subscription créée ou mise à jour', {
-      userId,
-      stripeCustomerId: data.stripeCustomerId,
-      plan: data.plan
-    });
+    // 🔒 Ne pas écraser un abonnement actif par une annulation si un actif est déjà présent
+    if (data.status === 'canceled') {
+      const existing = await Subscription.findOne({ userId: objectId, status: 'active' });
+      if (existing) {
+        logger.warn(`[⚠️] Abonnement actif existant – annulation ignorée`, { userId });
+        return existing;
+      }
+    }
 
-    return Subscription.findOneAndUpdate(
+    const updated = await Subscription.findOneAndUpdate(
       { userId: objectId },
       {
         ...data,
@@ -31,6 +38,15 @@ const SubscriptionIntegrationService = {
       },
       { upsert: true, new: true }
     );
+
+    logger.info("[✅] Subscription mise à jour", {
+      userId: objectId,
+      status: updated.status,
+      plan: updated.plan,
+      stripeId: updated.stripeSubscriptionId
+    });
+
+    return updated;
   },
 
   async getUserIdFromCustomerId(customerId) {
@@ -42,7 +58,7 @@ const SubscriptionIntegrationService = {
   },
 
   async recordSubscriptionPayment(userId, paymentData) {
-    logger.info(`Paiement reçu pour ${userId}`, paymentData);
+    logger.info("💰 Paiement reçu", { userId, ...paymentData });
     return Subscription.findOneAndUpdate(
       { userId },
       {
@@ -55,7 +71,7 @@ const SubscriptionIntegrationService = {
   },
 
   async recordPaymentFailure(userId, failureData) {
-    logger.warn(`Échec de paiement pour ${userId}`, failureData);
+    logger.warn("❌ Échec de paiement", { userId, ...failureData });
     return Subscription.findOneAndUpdate(
       { userId },
       {
@@ -76,6 +92,33 @@ const SubscriptionIntegrationService = {
       default:
         return 'premium';
     }
+  },
+
+  async getCurrentSubscription(userId) {
+    return Subscription.findOne({
+      userId: new mongoose.Types.ObjectId(userId),
+      isActive: true
+    });
+  },
+
+  async cancelSubscription(userId) {
+    const subscription = await Subscription.findOne({ userId, status: 'active' });
+
+    if (!subscription) {
+      throw new Error("Aucun abonnement actif à annuler.");
+    }
+
+    subscription.status = 'canceled';
+    subscription.endDate = new Date();
+    subscription.isActive = false;
+
+    await subscription.save();
+
+    await User.findByIdAndUpdate(userId, { role: 'user' });
+
+    logger.info(`[🔚] Abonnement annulé pour ${userId}`);
+
+    return subscription;
   }
 };
 

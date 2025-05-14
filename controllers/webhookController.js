@@ -61,45 +61,56 @@ class WebhookController {
     logger.info('[🔥] handleCheckoutSessionCompleted called', { session });
   
     const userId = session.metadata?.userId;
-    const plan = session.metadata?.plan;
+    const planFromMetadata = session.metadata?.plan;
   
     if (!userId) {
       logger.error('[❌] Aucun userId trouvé dans les metadata Stripe');
       throw new Error("User ID manquant dans metadata");
     }
   
-    logger.info(`Checkout réussi pour ${userId}, plan: ${plan}`);
+    logger.info(`Checkout réussi pour ${userId}, plan: ${planFromMetadata}`);
   
-    let stripePriceId = null;
     let stripeSubscriptionId = null;
+    let stripePriceId = null;
+    let plan = planFromMetadata || 'premium';
+    const now = new Date();
   
     const isTest = session.id === 'cs_test_simulated';
   
     if (session.subscription && !isTest) {
       try {
-        const subscription = await stripe.subscriptions.retrieve(session.subscription);
-        stripeSubscriptionId = subscription.id;
-        stripePriceId = subscription.items.data[0]?.price?.id;
+        const stripeSub = await stripe.subscriptions.retrieve(session.subscription);
+        stripeSubscriptionId = stripeSub.id;
+        stripePriceId = stripeSub.items.data[0]?.price?.id;
+        plan = SubscriptionIntegrationService.getPlanFromStripePrice(stripePriceId);
       } catch (err) {
-        logger.warn(`[Stripe] Erreur de récupération de l'abonnement: ${err.message}`);
+        logger.warn(`[Stripe] Erreur récupération abonnement: ${err.message}`);
       }
     }
   
-    const result = await SubscriptionIntegrationService.updateSubscription(userId, {
+    const updated = await SubscriptionIntegrationService.updateSubscription(userId, {
       plan,
-      paymentMethod: 'stripe',
       status: 'active',
+      paymentMethod: 'stripe',
+      isActive: true,
       sessionId: session.id,
       stripeCustomerId: session.customer,
       stripeSubscriptionId,
       stripePriceId,
+      startDate: now,
+      lastPaymentDate: now,
+      lastTransactionId: session.payment_intent || session.id,
       updateUserRole: true
     });
   
-    logger.info('[✅] Subscription enregistrée avec succès');
+    logger.info('[✅] Abonnement enregistré & rôle mis à jour', {
+      userId,
+      plan,
+      role: 'premium'
+    });
   
-    return result; // <--- ça doit renvoyer un résultat ici
-  }  
+    return updated;
+  }    
 
   static async handleSubscriptionDeleted(subscription) {
     const customerId = subscription.customer;

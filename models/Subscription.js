@@ -9,7 +9,7 @@ const SubscriptionSchema = new Schema({
   endDate: { type: Date },
 
   isActive: { type: Boolean, default: true },
-  status: { type: String, enum: ['active', 'cancelled', 'suspended', 'trialing', 'incomplete'], default: 'active' },
+  status: { type: String, enum: ['active', 'canceled', 'suspended', 'trialing', 'incomplete'], default: 'active' },
   paymentMethod: { type: String, enum: ['stripe', 'paypal', 'manual'], default: 'stripe' },
 
   stripeCustomerId: { type: String },
