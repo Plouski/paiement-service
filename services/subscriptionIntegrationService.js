@@ -2,6 +2,8 @@ const Subscription = require('../models/Subscription');
 const User = require('../models/User');
 const { logger } = require('../utils/logger');
 const mongoose = require('mongoose');
+const Stripe = require('stripe');
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const SubscriptionIntegrationService = {
   async updateSubscription(userId, data) {
@@ -102,23 +104,126 @@ const SubscriptionIntegrationService = {
   },
 
   async cancelSubscription(userId) {
-    const subscription = await Subscription.findOne({ userId, status: 'active' });
+    const subscription = await Subscription.findOne({ 
+      userId, 
+      status: 'active',
+      isActive: true 
+    });
 
     if (!subscription) {
       throw new Error("Aucun abonnement actif à annuler.");
     }
 
+    logger.info(`[🔚] Début annulation abonnement pour ${userId}`, {
+      stripeSubscriptionId: subscription.stripeSubscriptionId,
+      plan: subscription.plan
+    });
+
+    // 🔥 ÉTAPE 1 : Annuler dans Stripe AVANT la DB
+    if (subscription.stripeSubscriptionId) {
+      try {
+        logger.info(`[📞] Annulation Stripe subscription: ${subscription.stripeSubscriptionId}`);
+        
+        const canceledStripeSubscription = await stripe.subscriptions.cancel(
+          subscription.stripeSubscriptionId,
+          {
+            // Options d'annulation
+            prorate: false,  // Pas de proratisation
+            invoice_now: false,  // Pas de facture immédiate
+          }
+        );
+
+        logger.info(`[✅] Stripe subscription annulé:`, {
+          id: canceledStripeSubscription.id,
+          status: canceledStripeSubscription.status,
+          canceled_at: canceledStripeSubscription.canceled_at
+        });
+
+      } catch (stripeError) {
+        logger.error(`[❌] Erreur annulation Stripe:`, {
+          message: stripeError.message,
+          type: stripeError.type,
+          code: stripeError.code
+        });
+
+        // Si l'abonnement n'existe plus dans Stripe, continuer quand même
+        if (stripeError.code === 'resource_missing') {
+          logger.warn(`[⚠️] Abonnement déjà supprimé dans Stripe, continuation...`);
+        } else {
+          // Pour les autres erreurs, propager l'erreur
+          throw new Error(`Échec annulation Stripe: ${stripeError.message}`);
+        }
+      }
+    } else {
+      logger.warn(`[⚠️] Pas de stripeSubscriptionId trouvé, annulation locale uniquement`);
+    }
+
+    // 🔥 ÉTAPE 2 : Mettre à jour la DB locale
     subscription.status = 'canceled';
     subscription.endDate = new Date();
     subscription.isActive = false;
+    subscription.updatedAt = new Date();
 
     await subscription.save();
 
+    // 🔥 ÉTAPE 3 : Rétrograder le rôle utilisateur
     await User.findByIdAndUpdate(userId, { role: 'user' });
 
-    logger.info(`[🔚] Abonnement annulé pour ${userId}`);
+    logger.info(`[🔚] Abonnement complètement annulé pour ${userId}`, {
+      localStatus: subscription.status,
+      endDate: subscription.endDate
+    });
 
     return subscription;
+  },
+
+  // 🔥 NOUVELLE MÉTHODE : Vérifier le statut Stripe vs DB
+  async syncSubscriptionWithStripe(userId) {
+    try {
+      const localSubscription = await Subscription.findOne({ userId });
+      
+      if (!localSubscription || !localSubscription.stripeSubscriptionId) {
+        return { synced: true, message: 'Pas d\'abonnement Stripe à synchroniser' };
+      }
+
+      // Récupérer le statut depuis Stripe
+      const stripeSubscription = await stripe.subscriptions.retrieve(
+        localSubscription.stripeSubscriptionId
+      );
+
+      logger.info(`[🔄] Sync check:`, {
+        local: localSubscription.status,
+        stripe: stripeSubscription.status
+      });
+
+      // Si les statuts diffèrent, mettre à jour la DB
+      if (localSubscription.status !== stripeSubscription.status) {
+        logger.warn(`[⚠️] Désynchronisation détectée!`, {
+          userId,
+          localStatus: localSubscription.status,
+          stripeStatus: stripeSubscription.status
+        });
+
+        await this.updateSubscription(userId, {
+          status: stripeSubscription.status,
+          isActive: stripeSubscription.status === 'active',
+          updateUserRole: true
+        });
+
+        return { 
+          synced: false, 
+          corrected: true,
+          oldStatus: localSubscription.status,
+          newStatus: stripeSubscription.status
+        };
+      }
+
+      return { synced: true, message: 'Statuts synchronisés' };
+
+    } catch (error) {
+      logger.error(`[❌] Erreur sync Stripe:`, error.message);
+      return { synced: false, error: error.message };
+    }
   }
 };
 

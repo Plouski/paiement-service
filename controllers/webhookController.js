@@ -1,13 +1,14 @@
 // controllers/webhookController.js
 
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
-const { logger } = require('../utils/logger');
-const SubscriptionIntegrationService = require('../services/subscriptionIntegrationService');
-const axios = require('axios');
+const { logger } = require("../utils/logger");
+const SubscriptionIntegrationService = require("../services/subscriptionIntegrationService");
+const NotificationService = require("../services/notificationService");
+const axios = require("axios");
 
 class WebhookController {
   static async handleStripeWebhook(req, res) {
-    const sig = req.headers['stripe-signature'];
+    const sig = req.headers["stripe-signature"];
     const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
     let event;
 
@@ -31,20 +32,34 @@ class WebhookController {
   static async processWebhookEvent(event, res) {
     try {
       switch (event.type) {
-        case 'checkout.session.completed':
-          return res.json(await WebhookController.handleCheckoutSessionCompleted(event.data.object));
+        case "checkout.session.completed":
+          return res.json(
+            await WebhookController.handleCheckoutSessionCompleted(
+              event.data.object
+            )
+          );
 
-        case 'customer.subscription.deleted':
-          return res.json(await WebhookController.handleSubscriptionDeleted(event.data.object));
+        case "customer.subscription.deleted":
+          return res.json(
+            await WebhookController.handleSubscriptionDeleted(event.data.object)
+          );
 
-        case 'customer.subscription.updated':
-          return res.json(await WebhookController.handleSubscriptionUpdated(event.data.object));
+        case "customer.subscription.updated":
+          return res.json(
+            await WebhookController.handleSubscriptionUpdated(event.data.object)
+          );
 
-        case 'invoice.paid':
-          return res.json(await WebhookController.handleInvoicePaid(event.data.object));
+        case "invoice.paid":
+          return res.json(
+            await WebhookController.handleInvoicePaid(event.data.object)
+          );
 
-        case 'invoice.payment_failed':
-          return res.json(await WebhookController.handleInvoicePaymentFailed(event.data.object));
+        case "invoice.payment_failed":
+          return res.json(
+            await WebhookController.handleInvoicePaymentFailed(
+              event.data.object
+            )
+          );
 
         default:
           logger.info(`Événement non traité: ${event.type}`);
@@ -57,77 +72,141 @@ class WebhookController {
   }
 
   static async handleCheckoutSessionCompleted(session) {
-    logger.info('[📥] Stripe webhook hit: checkout.session.completed');
-    logger.info('[🔥] handleCheckoutSessionCompleted called', { session });
-  
+    logger.info("[📥] Stripe webhook hit: checkout.session.completed");
+
     const userId = session.metadata?.userId;
     const planFromMetadata = session.metadata?.plan;
-  
+
     if (!userId) {
-      logger.error('[❌] Aucun userId trouvé dans les metadata Stripe');
+      logger.error("[❌] Aucun userId trouvé dans les metadata Stripe");
       throw new Error("User ID manquant dans metadata");
     }
-  
+
     logger.info(`Checkout réussi pour ${userId}, plan: ${planFromMetadata}`);
-  
+
     let stripeSubscriptionId = null;
     let stripePriceId = null;
-    let plan = planFromMetadata || 'premium';
+    let plan = planFromMetadata || "premium";
     const now = new Date();
-  
-    const isTest = session.id === 'cs_test_simulated';
-  
+
+    const isTest = session.id === "cs_test_simulated";
+
     if (session.subscription && !isTest) {
       try {
-        const stripeSub = await stripe.subscriptions.retrieve(session.subscription);
+        const stripeSub = await stripe.subscriptions.retrieve(
+          session.subscription
+        );
         stripeSubscriptionId = stripeSub.id;
         stripePriceId = stripeSub.items.data[0]?.price?.id;
-        plan = SubscriptionIntegrationService.getPlanFromStripePrice(stripePriceId);
+        plan =
+          SubscriptionIntegrationService.getPlanFromStripePrice(stripePriceId);
       } catch (err) {
         logger.warn(`[Stripe] Erreur récupération abonnement: ${err.message}`);
       }
     }
-  
-    const updated = await SubscriptionIntegrationService.updateSubscription(userId, {
-      plan,
-      status: 'active',
-      paymentMethod: 'stripe',
-      isActive: true,
-      sessionId: session.id,
-      stripeCustomerId: session.customer,
-      stripeSubscriptionId,
-      stripePriceId,
-      startDate: now,
-      lastPaymentDate: now,
-      lastTransactionId: session.payment_intent || session.id,
-      updateUserRole: true
-    });
-  
-    logger.info('[✅] Abonnement enregistré & rôle mis à jour', {
+
+    const updated = await SubscriptionIntegrationService.updateSubscription(
       userId,
-      plan,
-      role: 'premium'
-    });
-  
+      {
+        plan,
+        status: "active",
+        paymentMethod: "stripe",
+        isActive: true,
+        sessionId: session.id,
+        stripeCustomerId: session.customer,
+        stripeSubscriptionId,
+        stripePriceId,
+        startDate: now,
+        lastPaymentDate: now,
+        lastTransactionId: session.payment_intent || session.id,
+        updateUserRole: true,
+      }
+    );
+
+    // 🔥 NOUVEAU : Récupérer les infos utilisateur et envoyer notifications
+    try {
+      const User = require("../models/User");
+      const user = await User.findById(userId);
+
+      if (user && user.email) {
+        // Générer et envoyer la facture
+        const invoiceData = NotificationService.generateInvoiceData(
+          {
+            plan,
+            userEmail: user.email,
+            userName: `${user.firstName} ${user.lastName}`,
+            paymentMethod: "stripe",
+          },
+          {
+            amount: session.amount_total / 100,
+            currency: session.currency,
+            transactionId: session.payment_intent || session.id,
+          }
+        );
+
+        await NotificationService.sendInvoice(user.email, invoiceData);
+
+        // Notification début d'abonnement
+        await NotificationService.sendSubscriptionStarted(user.email, {
+          plan,
+          startDate: now,
+          amount: session.amount_total / 100,
+        });
+
+        logger.info("✅ Notifications envoyées avec succès");
+      }
+    } catch (notificationError) {
+      logger.warn("⚠️ Erreur envoi notifications:", notificationError.message);
+      // Ne pas faire échouer le webhook pour une erreur de notification
+    }
+
     return updated;
-  }    
+  }
 
   static async handleSubscriptionDeleted(subscription) {
     const customerId = subscription.customer;
-    const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(customerId);
-    return SubscriptionIntegrationService.updateSubscription(userId, {
-      status: 'canceled',
-      plan: 'free',
-      stripeSubscriptionId: subscription.id,
-      updateUserRole: true
-    });
+    const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(
+      customerId
+    );
+
+    const result = await SubscriptionIntegrationService.updateSubscription(
+      userId,
+      {
+        status: "canceled",
+        plan: "free",
+        stripeSubscriptionId: subscription.id,
+        updateUserRole: true,
+      }
+    );
+
+    // 🔥 NOUVEAU : Notification fin d'abonnement
+    try {
+      const User = require("../models/User");
+      const user = await User.findById(userId);
+
+      if (user && user.email) {
+        await NotificationService.sendSubscriptionEnded(user.email, {
+          plan: result.plan,
+          endDate: new Date(),
+        });
+      }
+    } catch (notificationError) {
+      logger.warn(
+        "⚠️ Erreur notification fin abonnement:",
+        notificationError.message
+      );
+    }
+
+    return result;
   }
 
   static async handleSubscriptionUpdated(subscription) {
     const customerId = subscription.customer;
-    const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(customerId);
+    const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(
+      customerId
+    );
 
-    let plan = 'premium';
+    let plan = "premium";
     if (subscription.items.data.length > 0) {
       const priceId = subscription.items.data[0].price.id;
       plan = SubscriptionIntegrationService.getPlanFromStripePrice(priceId);
@@ -137,35 +216,63 @@ class WebhookController {
       status: subscription.status,
       plan,
       stripeSubscriptionId: subscription.id,
-      updateUserRole: true
+      updateUserRole: true,
     });
   }
 
   static async handleInvoicePaid(invoice) {
     const customerId = invoice.customer;
-    const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(customerId);
+    const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(
+      customerId
+    );
 
     return SubscriptionIntegrationService.recordSubscriptionPayment(userId, {
       amount: invoice.amount_paid / 100,
       currency: invoice.currency,
       transactionId: invoice.id,
       invoiceId: invoice.id,
-      status: 'success',
-      isRenewal: invoice.billing_reason === 'subscription_cycle'
+      status: "success",
+      isRenewal: invoice.billing_reason === "subscription_cycle",
     });
   }
 
   static async handleInvoicePaymentFailed(invoice) {
     const customerId = invoice.customer;
-    const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(customerId);
+    const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(
+      customerId
+    );
 
-    return SubscriptionIntegrationService.recordPaymentFailure(userId, {
-      amount: invoice.amount_due / 100,
-      currency: invoice.currency,
-      failureReason: invoice.last_payment_error?.message || 'Échec inconnu',
-      transactionId: invoice.payment_intent || invoice.id,
-      invoiceId: invoice.id
-    });
+    const result = await SubscriptionIntegrationService.recordPaymentFailure(
+      userId,
+      {
+        amount: invoice.amount_due / 100,
+        currency: invoice.currency,
+        failureReason: invoice.last_payment_error?.message || "Échec inconnu",
+        transactionId: invoice.payment_intent || invoice.id,
+        invoiceId: invoice.id,
+      }
+    );
+
+    // 🔥 NOUVEAU : Notification échec de paiement
+    try {
+      const User = require("../models/User");
+      const user = await User.findById(userId);
+
+      if (user && user.email) {
+        await NotificationService.sendPaymentFailed(user.email, {
+          amount: invoice.amount_due / 100,
+          failureReason: invoice.last_payment_error?.message || "Échec inconnu",
+          nextAttempt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000), // +3 jours
+        });
+      }
+    } catch (notificationError) {
+      logger.warn(
+        "⚠️ Erreur notification échec paiement:",
+        notificationError.message
+      );
+    }
+
+    return result;
   }
 }
 
