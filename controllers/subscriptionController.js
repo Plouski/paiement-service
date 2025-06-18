@@ -53,6 +53,7 @@ class subscriptionController {
     }
   }
 
+  // Annulation à la fin de période
   static async cancel(req, res) {
     try {
       const userId = req.user?.userId || req.user?.id;
@@ -61,22 +62,21 @@ class subscriptionController {
 
       logger.info(`[🔚] Demande d'annulation pour l'utilisateur ${userId}`);
 
-      const result = await subscriptionIntegrationService.cancelSubscription(
-        userId
-      );
+      const result = await subscriptionIntegrationService.cancelSubscriptionAtPeriodEnd(userId);
 
-      // 🔥 NOUVEAU : Envoyer notification d'annulation
+      // Notification d'annulation programmée
       try {
         const User = require("../models/User");
         const user = await User.findById(userId);
 
         if (user && user.email) {
           const NotificationService = require("../services/notificationService");
-          await NotificationService.sendSubscriptionEnded(user.email, {
+          await NotificationService.sendSubscriptionCancelScheduled(user.email, {
             plan: result.plan,
             endDate: result.endDate,
+            daysRemaining: result.daysRemaining
           });
-          logger.info(`[📧] Notification d'annulation envoyée à ${user.email}`);
+          logger.info(`[📧] Notification d'annulation programmée envoyée à ${user.email}`);
         }
       } catch (notificationError) {
         logger.warn(
@@ -88,7 +88,8 @@ class subscriptionController {
       res.json({
         success: true,
         subscription: result,
-        message: "Abonnement annulé avec succès dans Stripe et localement",
+        message: `Abonnement programmé pour annulation le ${result.endDate ? new Date(result.endDate).toLocaleDateString('fr-FR') : 'fin de période'}. Vous gardez vos avantages jusqu'à cette date.`,
+        cancelationType: "end_of_period"
       });
     } catch (err) {
       console.error("❌ Erreur annulation abonnement:", err);
@@ -99,23 +100,89 @@ class subscriptionController {
     }
   }
 
-  // static async update(req, res) {
-  //     try {
-  //       const userId = req.user?.userId || req.user?.id;
-  //       if (!userId) return res.status(401).json({ error: "Utilisateur non authentifié." });
+  // Réactiver un abonnement
+  static async reactivate(req, res) {
+    try {
+      const userId = req.user?.userId || req.user?.id;
+      if (!userId)
+        return res.status(401).json({ error: "Utilisateur non authentifié" });
 
-  //       const updatedSubscription = await subscriptionIntegrationService.updateSubscription(userId, req.body);
+      logger.info(`[🔄] Demande de réactivation pour l'utilisateur ${userId}`);
 
-  //       if (!updatedSubscription) {
-  //         return res.status(404).json({ error: "Abonnement introuvable ou non mis à jour." });
-  //       }
+      const result = await subscriptionIntegrationService.reactivateSubscription(userId);
 
-  //       res.json(updatedSubscription);
-  //     } catch (error) {
-  //       console.error("❌ Erreur update abonnement:", error);
-  //       res.status(500).json({ error: "Erreur lors de la mise à jour de l'abonnement." });
-  //     }
-  //   }
+      res.json({
+        success: true,
+        subscription: result,
+        message: "Abonnement réactivé avec succès !"
+      });
+    } catch (error) {
+      console.error("❌ Erreur réactivation abonnement:", error);
+      res.status(500).json({
+        error: "Erreur lors de la réactivation de l'abonnement",
+        details: error.message,
+      });
+    }
+  }
+
+  // 🔥 NOUVEAU : Changer de plan
+  static async changePlan(req, res) {
+    try {
+      const userId = req.user?.userId || req.user?.id;
+      const { newPlan } = req.body;
+
+      if (!userId) {
+        return res.status(401).json({ error: "Utilisateur non authentifié" });
+      }
+
+      if (!["monthly", "annual"].includes(newPlan)) {
+        return res.status(400).json({ error: "Plan invalide. Utilisez 'monthly' ou 'annual'" });
+      }
+
+      logger.info(`[🔄] Demande de changement de plan pour l'utilisateur ${userId} vers ${newPlan}`);
+
+      const result = await subscriptionIntegrationService.changePlan(userId, newPlan);
+
+      // Notification de changement de plan (temporairement désactivée)
+      /*
+      try {
+        const User = require("../models/User");
+        const user = await User.findById(userId);
+
+        if (user && user.email) {
+          const NotificationService = require("../services/notificationService");
+          await NotificationService.sendPlanChanged(user.email, {
+            oldPlan: result.oldPlan,
+            newPlan: result.newPlan,
+            effectiveDate: result.effectiveDate,
+            prorationAmount: result.prorationAmount
+          });
+          logger.info(`[📧] Notification changement de plan envoyée à ${user.email}`);
+        }
+      } catch (notificationError) {
+        logger.warn(
+          "⚠️ Erreur envoi notification changement plan:",
+          notificationError.message
+        );
+      }
+      */
+
+      res.json({
+        success: true,
+        subscription: result.subscription,
+        message: `Plan changé avec succès de ${result.oldPlan} vers ${result.newPlan}`,
+        oldPlan: result.oldPlan,
+        newPlan: result.newPlan,
+        prorationAmount: result.prorationAmount
+      });
+    } catch (error) {
+      console.error("❌ Erreur changement plan:", error);
+      res.status(500).json({
+        error: "Erreur lors du changement de plan",
+        details: error.message,
+      });
+    }
+  }
 
   static async createCheckoutSession(req, res) {
     try {
@@ -161,6 +228,12 @@ class subscriptionController {
         metadata: {
           userId,
           plan,
+        },
+        subscription_data: {
+          metadata: {
+            userId,
+            plan,
+          }
         },
         success_url: `${process.env.CLIENT_URL}/premium/success`,
         cancel_url: `${process.env.CLIENT_URL}/premium/cancel`,

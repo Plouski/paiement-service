@@ -201,10 +201,17 @@ class WebhookController {
   }
 
   static async handleSubscriptionUpdated(subscription) {
+    logger.info("[🔄] Webhook: customer.subscription.updated");
+
     const customerId = subscription.customer;
     const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(
       customerId
     );
+
+    if (!userId) {
+      logger.warn(`❌ Aucun userId trouvé pour customerId: ${customerId}`);
+      return { success: false, reason: "User not found" };
+    }
 
     let plan = "premium";
     if (subscription.items.data.length > 0) {
@@ -212,12 +219,66 @@ class WebhookController {
       plan = SubscriptionIntegrationService.getPlanFromStripePrice(priceId);
     }
 
-    return SubscriptionIntegrationService.updateSubscription(userId, {
-      status: subscription.status,
+    const endDate = new Date(subscription.current_period_end * 1000);
+
+    // 🔥 LOGIQUE CORRIGÉE pour cancel_at_period_end
+    let updateData = {
       plan,
       stripeSubscriptionId: subscription.id,
-      updateUserRole: true,
+      endDate: endDate,
+      updateUserRole: false, // Par défaut, ne pas changer le rôle
+    };
+
+    logger.info(`[🔍] Webhook subscription state:`, {
+      status: subscription.status,
+      cancel_at_period_end: subscription.cancel_at_period_end,
+      current_period_end: endDate,
     });
+
+    if (subscription.cancel_at_period_end === true) {
+      // 🎯 Abonnement programmé pour annulation à la fin de période
+      logger.info(
+        `[📅] Abonnement programmé pour annulation à la fin de période: ${endDate}`
+      );
+      updateData.status = "canceled"; // Status = canceled
+      updateData.isActive = true; // Mais reste actif jusqu'à endDate
+      updateData.cancelationType = "end_of_period";
+      // Garder le rôle premium jusqu'à la fin (updateUserRole: false)
+    } else if (
+      subscription.cancel_at_period_end === false &&
+      subscription.status === "active"
+    ) {
+      // 🎯 Abonnement réactivé (cancel_at_period_end remis à false)
+      logger.info(
+        `[✅] Abonnement réactivé - cancel_at_period_end est maintenant false`
+      );
+      updateData.status = "active";
+      updateData.isActive = true;
+      updateData.cancelationType = null;
+      updateData.updateUserRole = true; // Remettre le rôle premium
+    } else {
+      // 🎯 Cas normal - pas de changement de cancel_at_period_end
+      logger.info(`[🔄] Mise à jour normale de l'abonnement`);
+      updateData.status = subscription.status;
+      updateData.isActive = subscription.status === "active";
+
+      // Si statut devient inactif, rétrograder le rôle
+      if (subscription.status !== "active") {
+        updateData.updateUserRole = true;
+      }
+    }
+
+    // 🔥 LOG DÉTAILLÉ pour debug
+    logger.info(`[🔍] Update data pour userId ${userId}:`, {
+      cancel_at_period_end: subscription.cancel_at_period_end,
+      stripe_status: subscription.status,
+      updateData,
+    });
+
+    return SubscriptionIntegrationService.updateSubscription(
+      userId,
+      updateData
+    );
   }
 
   static async handleInvoicePaid(invoice) {

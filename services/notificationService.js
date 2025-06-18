@@ -1,4 +1,4 @@
-// services/notificationService.js - VERSION CORRIGÉE
+// services/notificationService.js - VERSION COMPLÈTE
 const axios = require('axios');
 const { logger } = require('../utils/logger');
 
@@ -66,6 +66,21 @@ class NotificationService {
   // Notification fin d'abonnement
   static async sendSubscriptionEnded(userEmail, subscriptionData) {
     return this.sendEmail('subscription_ended', userEmail, subscriptionData);
+  }
+
+  // 🔥 NOUVELLE : Notification annulation programmée
+  static async sendSubscriptionCancelScheduled(userEmail, subscriptionData) {
+    return this.sendEmail('subscription_cancel_scheduled', userEmail, subscriptionData);
+  }
+
+  // 🔥 NOUVELLE : Notification réactivation
+  static async sendSubscriptionReactivated(userEmail, subscriptionData) {
+    return this.sendEmail('subscription_reactivated', userEmail, subscriptionData);
+  }
+
+  // 🔥 NOUVELLE : Notification changement de plan
+  static async sendPlanChanged(userEmail, planData) {
+    return this.sendEmail('plan_changed', userEmail, planData);
   }
 
   // Notification échec de paiement
