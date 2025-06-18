@@ -1,144 +1,185 @@
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const morgan = require('morgan');
-const helmet = require('helmet');
-const path = require('path');
-const fs = require('fs');
-const { logger, stream } = require('./utils/logger');
-const connectToDatabase = require('./config/db');
-const { httpRequestsTotal, httpDurationHistogram } = require('./services/metricsServices');
-const metricsRoutes = require('./routes/metricsRoutes');
-const WebhookController = require('./controllers/webhookController');
+require("dotenv").config();
+const express = require("express");
+const mongoose = require("mongoose");
+const helmet = require("helmet");
+const cors = require("cors");
+const morgan = require("morgan");
+const path = require("path");
+const fs = require("fs");
 
-// Créer le dossier de logs s'il n'existe pas
-const logsDir = path.join(__dirname, 'logs');
-if (!fs.existsSync(logsDir)) {
-  fs.mkdirSync(logsDir);
-}
+const { logger, stream } = require("./utils/logger");
+const connectToDatabase = require("./config/db");
+const WebhookController = require("./controllers/webhookController");
 
-// Connexion à la base de données MongoDB
-connectToDatabase();
+const subscriptionRoutes = require("./routes/subscriptionRoutes");
+const metricsRoutes = require("./routes/metricsRoutes");
 
-// Initialiser express
+const {
+  httpRequestsTotal,
+  httpDurationHistogram,
+  serviceHealthStatus,
+  externalServiceHealth,
+} = require('./services/metricsServices');
+
 const app = express();
 const PORT = process.env.PORT || 5004;
 
-app.post(
-  '/webhook',
-  express.raw({ type: 'application/json' }),
-  WebhookController.handleStripeWebhook
-);
+console.log("💳 Lancement du serveur de paiement...");
 
-// ───────────── CORS ─────────────
-const allowedOrigins = process.env.CORS_ORIGINS 
-  ? process.env.CORS_ORIGINS.split(',') 
-  : ['http://localhost:3000'];
+(async () => {
+  try {
+    // Connexion MongoDB
+    await connectToDatabase();
 
-const corsOptions = {
-  origin: function (origin, callback) {
-    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      logger.warn(`Requête CORS bloquée depuis l'origine: ${origin}`);
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
-  credentials: true,
-  maxAge: 86400,
-};
+    // Création du dossier de logs s'il n'existe pas
+    const logsDir = path.join(__dirname, "logs");
+    if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir);
 
-// ───────────── Middlewares globaux ─────────────
-app.use(helmet({ contentSecurityPolicy: process.env.NODE_ENV === 'production' ? undefined : false }));
-app.use(cors(corsOptions));
-app.use(morgan('combined', { stream }));
+    // Sécurité HTTP
+    app.use(
+      helmet({
+        contentSecurityPolicy: process.env.NODE_ENV === "production" ? undefined : false,
+        crossOriginEmbedderPolicy: false,
+      })
+    );
 
-// ───────────── Metrics Middleware ─────────────
-app.use((req, res, next) => {
-  const start = process.hrtime();
+    // CORS
+    app.use(cors({
+      origin: process.env.CORS_ORIGINS?.split(",") || ["http://localhost:3000"],
+      credentials: true,
+      methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+      allowedHeaders: ["Content-Type", "Authorization", "x-api-key"],
+      maxAge: 86400,
+    }));
 
-  res.on('finish', () => {
-    const duration = process.hrtime(start);
-    const seconds = duration[0] + duration[1] / 1e9;
+    // Logger HTTP connecté à Winston
+    app.use(morgan("combined", { stream }));
 
-    httpRequestsTotal.inc({
-      method: req.method,
-      route: req.route ? req.route.path : req.path,
-      status_code: res.statusCode,
+    // ⏱Middleware de suivi des métriques HTTP
+    app.use((req, res, next) => {
+      const start = process.hrtime();
+      res.on("finish", () => {
+        const duration = process.hrtime(start);
+        const seconds = duration[0] + duration[1] / 1e9;
+
+        httpRequestsTotal.inc({
+          method: req.method,
+          route: req.route?.path || req.path,
+          status_code: res.statusCode,
+        });
+
+        httpDurationHistogram.observe({
+          method: req.method,
+          route: req.route?.path || req.path,
+          status_code: res.statusCode,
+        }, seconds);
+      });
+      next();
     });
 
-    httpDurationHistogram.observe({
-      method: req.method,
-      route: req.route ? req.route.path : req.path,
-      status_code: res.statusCode,
-    }, seconds);
-  });
-
-  next();
-});
-
-// ───────────── Body parser ─────────────
-app.use(/^(?!\/webhooks\/stripe).+/, express.json({ limit: '1mb' }));
-app.use(/^(?!\/webhooks\/stripe).+/, express.urlencoded({ extended: true }));
-
-// ───────────── Routes ─────────────
-const subscriptionRoutes = require('./routes/subscriptionRoutes');
-const stripeWebhookRoutes = require('./routes/stripeWebhookRoutes');
-app.use('/subscription', subscriptionRoutes);
-app.use('/webhooks', stripeWebhookRoutes);
-app.use('/metrics', metricsRoutes);
-
-// ───────────── Endpoint de santé ─────────────
-app.get('/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'ok',
-    service: 'payment-service',
-    version: process.env.npm_package_version || '1.0.0',
-    timestamp: new Date().toISOString(),
-  });
-});
-
-// ───────────── 404 & gestion des erreurs ─────────────
-app.use((req, res) => {
-  res.status(404).json({
-    error: {
-      message: 'Endpoint not found',
-      path: req.path,
-      method: req.method,
-    },
-  });
-});
-
-app.use((err, req, res, next) => {
-  logger.error(`Erreur non gérée: ${err.stack}`);
-  const statusCode = err.statusCode || 500;
-  const errorResponse = {
-    error: {
-      message: err.message || 'Internal Server Error',
-      code: err.code || 'INTERNAL_ERROR',
-      ...(process.env.NODE_ENV !== 'production' && { stack: err.stack }),
-    },
-  };
-  res.status(statusCode).json(errorResponse);
-});
-
-// ───────────── Lancer le serveur ─────────────
-const server = app.listen(PORT, () => {
-  logger.info(`✅ Payment service running on port ${PORT}`);
-  logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-});
-
-// ───────────── Arrêt propre ─────────────
-['SIGTERM', 'SIGINT'].forEach(signal => {
-  process.on(signal, () => {
-    logger.info(`${signal} signal received: closing HTTP server`);
-    server.close(() => {
-      logger.info('HTTP server closed');
-      process.exit(0);
+    // Middleware JSON sauf pour /webhook
+    app.use((req, res, next) => {
+      const isRawRoute = req.path === "/webhook" || req.path === "/webhooks/stripe";
+      if (!isRawRoute) express.json({ limit: "1mb" })(req, res, next);
+      else next();
     });
-  });
-});
 
-module.exports = app;
+    // Middleware URL-encoded sauf pour /webhook
+    app.use((req, res, next) => {
+      const isRawRoute = req.path === "/webhook" || req.path === "/webhooks/stripe";
+      if (!isRawRoute) express.urlencoded({ extended: true })(req, res, next);
+      else next();
+    });
+
+    // Route de webhook Stripe
+    app.post(
+      "/webhook",
+      express.raw({ type: "application/json" }),
+      WebhookController.handleStripeWebhook
+    );
+
+    // Routes principales
+    app.use("/subscription", subscriptionRoutes);
+    app.use("/metrics", metricsRoutes);
+
+    // Route de vérification de santé
+    app.get("/health", async (req, res) => {
+      const health = {
+        status: "healthy",
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        services: {},
+      };
+
+      if (mongoose.connection.readyState === 1) {
+        health.services.mongodb = "healthy";
+        externalServiceHealth.set({ service_name: "mongodb" }, 1);
+      } else {
+        health.services.mongodb = "unhealthy";
+        health.status = "degraded";
+        externalServiceHealth.set({ service_name: "mongodb" }, 0);
+      }
+
+      const isHealthy = health.status === "healthy" ? 1 : 0;
+      serviceHealthStatus.set({ service_name: "payment-service" }, isHealthy);
+
+      const statusCode = isHealthy ? 200 : 503;
+      res.status(statusCode).json(health);
+    });
+
+    // Test rapide de vie
+    app.get("/ping", (req, res) => {
+      res.status(200).json({
+        status: "pong ✅",
+        timestamp: new Date().toISOString(),
+        service: "payment-service",
+      });
+    });
+
+    // Gestion des routes non trouvées
+    app.use((req, res) => {
+      logger.warn("📍 Route non trouvée", {
+        method: req.method,
+        path: req.path,
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+
+      res.status(404).json({
+        error: "Route non trouvée",
+        message: `La route ${req.method} ${req.path} n'existe pas`,
+        availableRoutes: [
+          "GET /health",
+          "GET /ping",
+          "POST /webhook",
+          "GET /subscription",
+          "GET /metrics",
+        ],
+      });
+    });
+
+    // Middleware de gestion des erreurs
+    app.use((err, req, res, next) => {
+      logger.error(`Erreur non gérée: ${err.stack}`);
+      const statusCode = err.statusCode || err.status || 500;
+      res.status(statusCode).json({
+        error: "Erreur serveur",
+        message: err.message || "Erreur interne du serveur",
+        ...(process.env.NODE_ENV !== "production" && { stack: err.stack }),
+      });
+    });
+
+    // Lancement du serveur
+    app.listen(PORT, () => {
+      logger.info(`🚀 Serveur de paiement en écoute sur http://localhost:${PORT}`);
+      logger.info(`🌍 Environnement: ${process.env.NODE_ENV || "development"}`);
+      logger.info(`📊 Métriques: http://localhost:${PORT}/metrics`);
+      logger.info(`❤️ Santé: http://localhost:${PORT}/health`);
+    });    
+
+  } catch (err) {
+    console.error("❌ Erreur fatale au démarrage :", err.message);
+    console.error(err.stack);
+    process.exit(1);
+  }
+})();
