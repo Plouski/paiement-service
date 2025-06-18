@@ -1,9 +1,10 @@
 const subscriptionIntegrationService = require("../services/subscriptionIntegrationService.js");
 const Stripe = require("stripe");
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-const { logger } = require('../utils/logger');
+const { logger } = require("../utils/logger");
 
 class subscriptionController {
+  // Récupérer l'abonnement actif de l'utilisateur connecté
   static async getCurrentSubscription(req, res) {
     try {
       const userId = req.user?.userId || req.user?.id;
@@ -23,11 +24,12 @@ class subscriptionController {
 
       res.json(subscription);
     } catch (error) {
-      console.error("❌ Erreur getCurrentSubscription:", error);
+      logger.error("❌ Erreur getCurrentSubscription:", error);
       res.status(500).json({ message: "Erreur serveur." });
     }
   }
 
+  // Récupérer l'abonnement actif d'un utilisateur spécifique (admin ou le user lui-même)
   static async getUserSubscription(req, res) {
     const userId = req.params.userId;
     const requesterId = req.user?.userId || req.user?.id;
@@ -48,35 +50,42 @@ class subscriptionController {
 
       res.json(subscription);
     } catch (error) {
-      console.error("❌ Erreur getUserSubscription:", error);
+      logger.error("❌ Erreur getUserSubscription:", error);
       res.status(500).json({ message: "Erreur serveur." });
     }
   }
 
-  // Annulation à la fin de période
+  // Annuler l'abonnement à la fin de la période de facturation
   static async cancel(req, res) {
     try {
       const userId = req.user?.userId || req.user?.id;
       if (!userId)
         return res.status(401).json({ error: "Utilisateur non authentifié" });
 
-      logger.info(`[🔚] Demande d'annulation pour l'utilisateur ${userId}`);
+      logger.info("[🔚] Demande d'annulation pour l'utilisateur ${userId}");
 
-      const result = await subscriptionIntegrationService.cancelSubscriptionAtPeriodEnd(userId);
+      const result =
+        await subscriptionIntegrationService.cancelSubscriptionAtPeriodEnd(
+          userId
+        );
 
-      // Notification d'annulation programmée
       try {
         const User = require("../models/User");
         const user = await User.findById(userId);
 
         if (user && user.email) {
           const NotificationService = require("../services/notificationService");
-          await NotificationService.sendSubscriptionCancelScheduled(user.email, {
-            plan: result.plan,
-            endDate: result.endDate,
-            daysRemaining: result.daysRemaining
-          });
-          logger.info(`[📧] Notification d'annulation programmée envoyée à ${user.email}`);
+          await NotificationService.sendSubscriptionCancelScheduled(
+            user.email,
+            {
+              plan: result.plan,
+              endDate: result.endDate,
+              daysRemaining: result.daysRemaining,
+            }
+          );
+          logger.info(
+            "[📧] Notification d'annulation programmée envoyée à ${user.email}"
+          );
         }
       } catch (notificationError) {
         logger.warn(
@@ -88,11 +97,12 @@ class subscriptionController {
       res.json({
         success: true,
         subscription: result,
-        message: `Abonnement programmé pour annulation le ${result.endDate ? new Date(result.endDate).toLocaleDateString('fr-FR') : 'fin de période'}. Vous gardez vos avantages jusqu'à cette date.`,
-        cancelationType: "end_of_period"
+        message:
+          "Abonnement programmé pour annulation le ${result.endDate ? new Date(result.endDate).toLocaleDateString('fr-FR') : 'fin de période'}. Vous gardez vos avantages jusqu'à cette date.",
+        cancelationType: "end_of_period",
       });
     } catch (err) {
-      console.error("❌ Erreur annulation abonnement:", err);
+      logger.error("❌ Erreur annulation abonnement:", err);
       res.status(500).json({
         error: "Erreur lors de l'annulation de l'abonnement",
         details: err.message,
@@ -100,24 +110,25 @@ class subscriptionController {
     }
   }
 
-  // Réactiver un abonnement
+  // Réactiver un abonnement annulé
   static async reactivate(req, res) {
     try {
       const userId = req.user?.userId || req.user?.id;
       if (!userId)
         return res.status(401).json({ error: "Utilisateur non authentifié" });
 
-      logger.info(`[🔄] Demande de réactivation pour l'utilisateur ${userId}`);
+      logger.info("[🔄] Demande de réactivation pour l'utilisateur ${userId}");
 
-      const result = await subscriptionIntegrationService.reactivateSubscription(userId);
+      const result =
+        await subscriptionIntegrationService.reactivateSubscription(userId);
 
       res.json({
         success: true,
         subscription: result,
-        message: "Abonnement réactivé avec succès !"
+        message: "Abonnement réactivé avec succès !",
       });
     } catch (error) {
-      console.error("❌ Erreur réactivation abonnement:", error);
+      logger.error("❌ Erreur réactivation abonnement:", error);
       res.status(500).json({
         error: "Erreur lors de la réactivation de l'abonnement",
         details: error.message,
@@ -125,7 +136,7 @@ class subscriptionController {
     }
   }
 
-  // 🔥 NOUVEAU : Changer de plan
+  // Changer le plan d'abonnement (mensuel ↔ annuel)
   static async changePlan(req, res) {
     try {
       const userId = req.user?.userId || req.user?.id;
@@ -136,47 +147,31 @@ class subscriptionController {
       }
 
       if (!["monthly", "annual"].includes(newPlan)) {
-        return res.status(400).json({ error: "Plan invalide. Utilisez 'monthly' ou 'annual'" });
+        return res
+          .status(400)
+          .json({ error: "Plan invalide. Utilisez 'monthly' ou 'annual'" });
       }
 
-      logger.info(`[🔄] Demande de changement de plan pour l'utilisateur ${userId} vers ${newPlan}`);
+      logger.info(
+        "[🔄] Demande de changement de plan pour l'utilisateur ${userId} vers ${newPlan}"
+      );
 
-      const result = await subscriptionIntegrationService.changePlan(userId, newPlan);
-
-      // Notification de changement de plan (temporairement désactivée)
-      /*
-      try {
-        const User = require("../models/User");
-        const user = await User.findById(userId);
-
-        if (user && user.email) {
-          const NotificationService = require("../services/notificationService");
-          await NotificationService.sendPlanChanged(user.email, {
-            oldPlan: result.oldPlan,
-            newPlan: result.newPlan,
-            effectiveDate: result.effectiveDate,
-            prorationAmount: result.prorationAmount
-          });
-          logger.info(`[📧] Notification changement de plan envoyée à ${user.email}`);
-        }
-      } catch (notificationError) {
-        logger.warn(
-          "⚠️ Erreur envoi notification changement plan:",
-          notificationError.message
-        );
-      }
-      */
+      const result = await subscriptionIntegrationService.changePlan(
+        userId,
+        newPlan
+      );
 
       res.json({
         success: true,
         subscription: result.subscription,
-        message: `Plan changé avec succès de ${result.oldPlan} vers ${result.newPlan}`,
+        message:
+          "Plan changé avec succès de ${result.oldPlan} vers ${result.newPlan}",
         oldPlan: result.oldPlan,
         newPlan: result.newPlan,
-        prorationAmount: result.prorationAmount
+        prorationAmount: result.prorationAmount,
       });
     } catch (error) {
-      console.error("❌ Erreur changement plan:", error);
+      logger.error("❌ Erreur changement plan:", error);
       res.status(500).json({
         error: "Erreur lors du changement de plan",
         details: error.message,
@@ -184,6 +179,7 @@ class subscriptionController {
     }
   }
 
+  // Créer une session Stripe Checkout pour souscrire à un abonnement
   static async createCheckoutSession(req, res) {
     try {
       const { plan } = req.body;
@@ -199,11 +195,9 @@ class subscriptionController {
           : process.env.STRIPE_PRICE_MONTHLY_ID;
 
       if (!priceId) {
-        return res
-          .status(500)
-          .json({
-            error: "Price ID non défini dans les variables d'environnement",
-          });
+        return res.status(500).json({
+          error: "Price ID non défini dans les variables d'environnement",
+        });
       }
 
       const userId = user?.userId || user?.id;
@@ -213,7 +207,7 @@ class subscriptionController {
           .json({ error: "ID utilisateur manquant dans le token JWT" });
       }
 
-      console.log("🔥 DEBUG checkout metadata:", { userId, email: user.email });
+      logger.debug("🔥 checkout metadata:", { userId, email: user.email });
 
       const session = await stripe.checkout.sessions.create({
         payment_method_types: ["card"],
@@ -233,7 +227,7 @@ class subscriptionController {
           metadata: {
             userId,
             plan,
-          }
+          },
         },
         success_url: `${process.env.CLIENT_URL}/premium/success`,
         cancel_url: `${process.env.CLIENT_URL}/premium/cancel`,
@@ -241,7 +235,7 @@ class subscriptionController {
 
       res.status(200).json({ url: session.url });
     } catch (error) {
-      console.error("❌ Erreur Checkout Stripe:", error);
+      logger.error("❌ Erreur Checkout Stripe:", error);
       res
         .status(500)
         .json({ error: "Erreur lors de la création de la session Stripe" });

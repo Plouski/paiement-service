@@ -1,7 +1,6 @@
-// payment-service/utils/logger.js
 const winston = require('winston');
 
-// Define log format
+// Format des logs (timestamp, erreurs avec stack, format JSON)
 const logFormat = winston.format.combine(
   winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
   winston.format.errors({ stack: true }),
@@ -9,29 +8,27 @@ const logFormat = winston.format.combine(
   winston.format.json()
 );
 
-// Create logger instance
+// Création du logger principal
 const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || 'info',
   format: logFormat,
   defaultMeta: { service: 'payment-service' },
   transports: [
-    // Write logs with level 'error' and below to error.log
     new winston.transports.File({ 
       filename: 'logs/error.log', 
       level: 'error',
-      maxsize: 5242880, // 5MB
+      maxsize: 5242880,
       maxFiles: 5
     }),
-    // Write all logs to combined.log
     new winston.transports.File({ 
       filename: 'logs/combined.log',
-      maxsize: 5242880, // 5MB
-      maxFiles: 5 
+      maxsize: 5242880,
+      maxFiles: 5
     })
   ]
 });
 
-// If not in production, also log to console
+// Affichage dans la console en développement (colorisé)
 if (process.env.NODE_ENV !== 'production') {
   logger.add(new winston.transports.Console({
     format: winston.format.combine(
@@ -41,7 +38,7 @@ if (process.env.NODE_ENV !== 'production') {
   }));
 }
 
-// Create a stream object for Morgan integration
+// Intégration avec Morgan (pour les requêtes HTTP Express)
 const stream = {
   write: (message) => {
     logger.info(message.trim());
