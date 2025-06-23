@@ -1,28 +1,63 @@
 const express = require('express');
 const { authMiddleware } = require("../middlewares/authMiddleware.js");
 const subscriptionController = require('../controllers/subscriptionController');
+const refundController = require('../controllers/refundController.js');
+const ValidationMiddleware = require('../middlewares/validationMiddleware');
+const RateLimitMiddleware = require('../middlewares/rateLimitMiddleware');
 
 const router = express.Router();
 
-// Middleware d'authentification global : toutes les routes nécessitent un utilisateur connecté
+// Rate limiting général
+router.use(RateLimitMiddleware.generalRateLimit());
+
+// Authentification pour toutes les routes
 router.use(authMiddleware);
 
-// Récupérer l'abonnement de l'utilisateur connecté
+// Validation de base
+router.use(ValidationMiddleware.sanitizeInput);
+router.use(ValidationMiddleware.validateRequestSize);
+
+// Récupérer l'abonnement actuel
 router.get("/current", subscriptionController.getCurrentSubscription);
 
-// Récupérer l'abonnement d'un utilisateur spécifique (admin ou soi-même)
-router.get("/user/:userId", subscriptionController.getUserSubscription);
+// Récupérer l'abonnement d'un utilisateur spécifique
+router.get("/user/:userId", 
+  ValidationMiddleware.validateUserId,
+  subscriptionController.getUserSubscription
+);
 
-// Annuler l’abonnement (fin de période)
+// Créer une session de paiement
+router.post("/checkout", 
+  // RateLimitMiddleware.paymentRateLimit(),
+  ValidationMiddleware.validatePaymentData,
+  subscriptionController.createCheckoutSession
+);
+
+// Annuler l'abonnement
 router.delete("/cancel", subscriptionController.cancel);
 
-// Réactiver un abonnement annulé (si éligible)
+// Réactiver l'abonnement
 router.post("/reactivate", subscriptionController.reactivate);
 
-// Changer le plan (mensuel ↔ annuel)
-router.put("/change-plan", subscriptionController.changePlan);
+// Changer de plan
+router.put("/change-plan", 
+  ValidationMiddleware.validatePlanChange,
+  subscriptionController.changePlan
+);
 
-// Créer une session Stripe Checkout (initialisation de paiement)
-router.post("/checkout", subscriptionController.createCheckoutSession);
+// Demander un remboursement
+router.post("/refund", 
+  // RateLimitMiddleware.refundRateLimit(),
+  refundController.processRefund
+);
+
+// Vérifier l'éligibilité au remboursement
+router.get("/refund/eligibility", 
+  refundController.checkEligibility
+);
+
+// Routes de debug
+router.get('/debug/dates', subscriptionController.debugSubscriptionDates);
+router.post('/debug/fix-dates', subscriptionController.fixSubscriptionDates);
 
 module.exports = router;

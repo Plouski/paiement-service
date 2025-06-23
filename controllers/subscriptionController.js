@@ -2,8 +2,113 @@ const subscriptionIntegrationService = require("../services/subscriptionIntegrat
 const Stripe = require("stripe");
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const { logger } = require("../utils/logger");
+const Subscription = require("../models/Subscription"); // 🆕 Ajouter cet import
+const User = require("../models/User"); // 🆕 Ajouter cet import
 
 class subscriptionController {
+  // 🆕 FONCTION DEBUG POUR VÉRIFIER LES DATES
+  static async debugSubscriptionDates(req, res) {
+    try {
+      const userId = req.user?.userId || req.user?.id;
+      const subscription = await Subscription.findOne({ userId });
+      
+      if (!subscription) {
+        return res.json({ error: "Aucun abonnement trouvé" });
+      }
+      
+      const now = new Date();
+      const start = new Date(subscription.startDate);
+      const end = new Date(subscription.endDate);
+      
+      const debugInfo = {
+        plan: subscription.plan,
+        status: subscription.status,
+        isActive: subscription.isActive,
+        dates: {
+          maintenant: now.toISOString(),
+          debut: start.toISOString(),
+          fin: end.toISOString(),
+          debut_fr: start.toLocaleDateString('fr-FR'),
+          fin_fr: end.toLocaleDateString('fr-FR')
+        },
+        duree: {
+          jours_totaux: Math.ceil((end - start) / (1000 * 60 * 60 * 24)),
+          jours_ecoules: Math.ceil((now - start) / (1000 * 60 * 60 * 24)),
+          jours_restants: Math.ceil((end - now) / (1000 * 60 * 60 * 24))
+        },
+        probleme_detecte: {
+          fin_avant_debut: end < start,
+          duree_trop_courte: (end - start) < (30 * 24 * 60 * 60 * 1000), // Moins de 30 jours
+          annuel_mais_court: subscription.plan === 'annual' && (end - start) < (300 * 24 * 60 * 60 * 1000), // Moins de 300 jours
+          monthly_mais_long: subscription.plan === 'monthly' && (end - start) > (40 * 24 * 60 * 60 * 1000) // Plus de 40 jours
+        },
+        raw_data: {
+          startDate_raw: subscription.startDate,
+          endDate_raw: subscription.endDate,
+          cancelationType: subscription.cancelationType,
+          refundStatus: subscription.refundStatus
+        }
+      };
+      
+      console.log("🔍 Debug subscription dates:", debugInfo);
+      res.json(debugInfo);
+      
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  // 🆕 FONCTION POUR CORRIGER MANUELLEMENT LES DATES
+  static async fixSubscriptionDates(req, res) {
+    try {
+      const userId = req.user?.userId || req.user?.id;
+      const subscription = await Subscription.findOne({ userId });
+      
+      if (!subscription) {
+        return res.status(404).json({ error: "Aucun abonnement trouvé" });
+      }
+
+      // Recalculer les dates correctes
+      const now = new Date();
+      let newEndDate = new Date(subscription.startDate || now);
+      
+      switch (subscription.plan) {
+        case 'monthly':
+          newEndDate.setMonth(newEndDate.getMonth() + 1);
+          break;
+        case 'annual':
+          newEndDate.setFullYear(newEndDate.getFullYear() + 1);
+          break;
+        default:
+          newEndDate.setMonth(newEndDate.getMonth() + 1);
+      }
+
+      // Mettre à jour en base
+      const updated = await Subscription.findByIdAndUpdate(
+        subscription._id,
+        {
+          endDate: newEndDate,
+          // Nettoyer aussi les champs problématiques
+          cancelationType: null,
+          refundStatus: "none"
+        },
+        { new: true }
+      );
+
+      res.json({
+        success: true,
+        message: "Dates corrigées",
+        old_end_date: subscription.endDate,
+        new_end_date: newEndDate,
+        plan: subscription.plan,
+        duration_days: Math.ceil((newEndDate - new Date(subscription.startDate)) / (1000 * 60 * 60 * 24))
+      });
+
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
   // Récupérer l'abonnement actif de l'utilisateur connecté
   static async getCurrentSubscription(req, res) {
     try {
@@ -21,6 +126,15 @@ class subscriptionController {
           .status(404)
           .json({ message: "Aucun abonnement actif trouvé." });
       }
+
+      // 🔍 Log pour debug
+      console.log("📊 Subscription retournée:", {
+        plan: subscription.plan,
+        startDate: subscription.startDate,
+        endDate: subscription.endDate,
+        daysTotal: subscription.endDate && subscription.startDate ? 
+          Math.ceil((new Date(subscription.endDate) - new Date(subscription.startDate)) / (1000 * 60 * 60 * 24)) : null
+      });
 
       res.json(subscription);
     } catch (error) {
@@ -62,7 +176,7 @@ class subscriptionController {
       if (!userId)
         return res.status(401).json({ error: "Utilisateur non authentifié" });
 
-      logger.info("[🔚] Demande d'annulation pour l'utilisateur ${userId}");
+      logger.info(`[🔚] Demande d'annulation pour l'utilisateur ${userId}`);
 
       const result =
         await subscriptionIntegrationService.cancelSubscriptionAtPeriodEnd(
@@ -84,7 +198,7 @@ class subscriptionController {
             }
           );
           logger.info(
-            "[📧] Notification d'annulation programmée envoyée à ${user.email}"
+            `[📧] Notification d'annulation programmée envoyée à ${user.email}`
           );
         }
       } catch (notificationError) {
@@ -98,7 +212,7 @@ class subscriptionController {
         success: true,
         subscription: result,
         message:
-          "Abonnement programmé pour annulation le ${result.endDate ? new Date(result.endDate).toLocaleDateString('fr-FR') : 'fin de période'}. Vous gardez vos avantages jusqu'à cette date.",
+          `Abonnement programmé pour annulation le ${result.endDate ? new Date(result.endDate).toLocaleDateString('fr-FR') : 'fin de période'}. Vous gardez vos avantages jusqu'à cette date.`,
         cancelationType: "end_of_period",
       });
     } catch (err) {
@@ -117,7 +231,7 @@ class subscriptionController {
       if (!userId)
         return res.status(401).json({ error: "Utilisateur non authentifié" });
 
-      logger.info("[🔄] Demande de réactivation pour l'utilisateur ${userId}");
+      logger.info(`[🔄] Demande de réactivation pour l'utilisateur ${userId}`);
 
       const result =
         await subscriptionIntegrationService.reactivateSubscription(userId);
@@ -153,7 +267,7 @@ class subscriptionController {
       }
 
       logger.info(
-        "[🔄] Demande de changement de plan pour l'utilisateur ${userId} vers ${newPlan}"
+        `[🔄] Demande de changement de plan pour l'utilisateur ${userId} vers ${newPlan}`
       );
 
       const result = await subscriptionIntegrationService.changePlan(
@@ -165,7 +279,7 @@ class subscriptionController {
         success: true,
         subscription: result.subscription,
         message:
-          "Plan changé avec succès de ${result.oldPlan} vers ${result.newPlan}",
+          `Plan changé avec succès de ${result.oldPlan} vers ${result.newPlan}`,
         oldPlan: result.oldPlan,
         newPlan: result.newPlan,
         prorationAmount: result.prorationAmount,
