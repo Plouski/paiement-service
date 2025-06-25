@@ -59,24 +59,6 @@ class JwtConfig {
       throw error;
     }
   }
-
-  // ───────────── Rafraîchir un token ─────────────
-  static refreshToken(refreshToken) {
-    try {
-      const decoded = this.verifyToken(refreshToken);
-
-      const accessToken = this.generateAccessToken({
-        _id: decoded.userId,
-        email: decoded.email,
-        role: decoded.role,
-      });
-
-      return accessToken;
-    } catch (error) {
-      logger.error('💥 Erreur lors du rafraîchissement du token :', error);
-      throw error;
-    }
-  }
 }
 
 module.exports = JwtConfig;
