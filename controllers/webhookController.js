@@ -3,6 +3,34 @@ const { logger } = require("../utils/logger");
 const SubscriptionIntegrationService = require("../services/subscriptionIntegrationService");
 const NotificationService = require("../services/notificationService");
 
+// Fonction pour calculer correctement les dates d'abonnement
+function calculateSubscriptionDates(plan, startDate = new Date()) {
+  const start = new Date(startDate);
+  let endDate = new Date(start);
+
+  switch (plan) {
+    case "monthly":
+      endDate.setMonth(endDate.getMonth() + 1);
+      break;
+
+    case "annual":
+      endDate.setFullYear(endDate.getFullYear() + 1);
+      break;
+
+    case "premium":
+      endDate.setMonth(endDate.getMonth() + 1);
+      break;
+
+    default:
+      endDate.setMonth(endDate.getMonth() + 1);
+  }
+
+  return {
+    startDate: start,
+    endDate: endDate,
+  };
+}
+
 class WebhookController {
 
   // Réception d’un webhook Stripe (signé)
@@ -35,7 +63,9 @@ class WebhookController {
       switch (event.type) {
         case "checkout.session.completed":
           return res.json(
-            await WebhookController.handleCheckoutSessionCompleted(event.data.object)
+            await WebhookController.handleCheckoutSessionCompleted(
+              event.data.object
+            )
           );
 
         case "customer.subscription.deleted":
@@ -55,7 +85,9 @@ class WebhookController {
 
         case "invoice.payment_failed":
           return res.json(
-            await WebhookController.handleInvoicePaymentFailed(event.data.object)
+            await WebhookController.handleInvoicePaymentFailed(
+              event.data.object
+            )
           );
 
         default:
@@ -85,34 +117,63 @@ class WebhookController {
 
     let stripeSubscriptionId = null;
     let stripePriceId = null;
-    let plan = planFromMetadata || "premium";
+    let plan = planFromMetadata || "monthly";
     const now = new Date();
 
     if (session.subscription && !isTest) {
       try {
-        const stripeSub = await stripe.subscriptions.retrieve(session.subscription);
+        const stripeSub = await stripe.subscriptions.retrieve(
+          session.subscription
+        );
         stripeSubscriptionId = stripeSub.id;
         stripePriceId = stripeSub.items.data[0]?.price?.id;
-        plan = SubscriptionIntegrationService.getPlanFromStripePrice(stripePriceId);
+
+        if (stripePriceId) {
+          plan = await SubscriptionIntegrationService.getPlanFromStripePrice(
+            stripePriceId
+          );
+        }
       } catch (err) {
-        logger.warn(`[⚠️ Stripe] Erreur récupération abonnement: ${err.message}`);
+        logger.warn(
+          `[⚠️ Stripe] Erreur récupération abonnement: ${err.message}`
+        );
       }
     }
 
-    const updated = await SubscriptionIntegrationService.updateSubscription(userId, {
-      plan,
-      status: "active",
-      paymentMethod: "stripe",
-      isActive: true,
-      sessionId: session.id,
-      stripeCustomerId: session.customer,
-      stripeSubscriptionId,
-      stripePriceId,
-      startDate: now,
-      lastPaymentDate: now,
-      lastTransactionId: session.payment_intent || session.id,
-      updateUserRole: true,
+    const { startDate, endDate } = calculateSubscriptionDates(plan, now);
+
+    console.log(`📅 Dates calculées pour plan ${plan}:`, {
+      startDate: startDate.toISOString(),
+      endDate: endDate.toISOString(),
+      duration: `${Math.ceil(
+        (endDate - startDate) / (1000 * 60 * 60 * 24)
+      )} jours`,
     });
+
+    const updated = await SubscriptionIntegrationService.updateSubscription(
+      userId,
+      {
+        plan,
+        status: "active",
+        paymentMethod: "stripe",
+        isActive: true,
+        sessionId: session.id,
+        stripeCustomerId: session.customer,
+        stripeSubscriptionId,
+        stripePriceId,
+        startDate: startDate,
+        endDate: endDate,
+        lastPaymentDate: now,
+        lastTransactionId: session.payment_intent || session.id,
+        updateUserRole: true,
+        cancelationType: null,
+        refundStatus: "none",
+        refundAmount: 0,
+        refundDate: null,
+        refundReason: null,
+        paymentStatus: "success",
+      }
+    );
 
     try {
       const User = require("../models/User");
@@ -134,6 +195,7 @@ class WebhookController {
         );
 
         await NotificationService.sendInvoice(user.email, invoiceData);
+
         await NotificationService.sendSubscriptionStarted(user.email, {
           plan,
           startDate: now,
@@ -143,47 +205,22 @@ class WebhookController {
         logger.info("📧 Notifications d'abonnement envoyées avec succès");
       }
     } catch (notificationError) {
-      logger.warn("⚠️ Erreur notification abonnement:", notificationError.message);
+      logger.warn(
+        "⚠️ Erreur notification abonnement:",
+        notificationError.message
+      );
     }
 
     return updated;
   }
 
-  // Traitement de la suppression d’un abonnement Stripe
-  static async handleSubscriptionDeleted(subscription) {
-    const customerId = subscription.customer;
-    const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(customerId);
-
-    const result = await SubscriptionIntegrationService.updateSubscription(userId, {
-      status: "canceled",
-      plan: "free",
-      stripeSubscriptionId: subscription.id,
-      updateUserRole: true,
-    });
-
-    try {
-      const User = require("../models/User");
-      const user = await User.findById(userId);
-
-      if (user?.email) {
-        await NotificationService.sendSubscriptionEnded(user.email, {
-          plan: result.plan,
-          endDate: new Date(),
-        });
-      }
-    } catch (notificationError) {
-      logger.warn("⚠️ Erreur notification fin abonnement:", notificationError.message);
-    }
-
-    return result;
-  }
-
-  // Traitement d'une mise à jour d’abonnement Stripe
   static async handleSubscriptionUpdated(subscription) {
     logger.info("[🔄] Stripe: customer.subscription.updated");
 
     const customerId = subscription.customer;
-    const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(customerId);
+    const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(
+      customerId
+    );
 
     if (!userId) {
       logger.warn(`❌ Aucun userId pour customerId: ${customerId}`);
@@ -212,7 +249,9 @@ class WebhookController {
     });
 
     if (subscription.cancel_at_period_end === true) {
-      logger.info(`[📅] Abonnement programmé pour annulation à la fin: ${endDate}`);
+      logger.info(
+        `[📅] Abonnement programmé pour annulation à la fin: ${endDate}`
+      );
       updateData.status = "canceled";
       updateData.isActive = true;
       updateData.cancelationType = "end_of_period";
@@ -233,13 +272,17 @@ class WebhookController {
 
     logger.debug(`[🛠️] Données de mise à jour pour ${userId}:`, updateData);
 
-    return SubscriptionIntegrationService.updateSubscription(userId, updateData);
+    return SubscriptionIntegrationService.updateSubscription(
+      userId,
+      updateData
+    );
   }
 
-  // Paiement réussi d'une facture Stripe
   static async handleInvoicePaid(invoice) {
     const customerId = invoice.customer;
-    const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(customerId);
+    const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(
+      customerId
+    );
 
     return SubscriptionIntegrationService.recordSubscriptionPayment(userId, {
       amount: invoice.amount_paid / 100,
@@ -251,18 +294,22 @@ class WebhookController {
     });
   }
 
-  // Paiement échoué d'une facture Stripe
   static async handleInvoicePaymentFailed(invoice) {
     const customerId = invoice.customer;
-    const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(customerId);
+    const userId = await SubscriptionIntegrationService.getUserIdFromCustomerId(
+      customerId
+    );
 
-    const result = await SubscriptionIntegrationService.recordPaymentFailure(userId, {
-      amount: invoice.amount_due / 100,
-      currency: invoice.currency,
-      failureReason: invoice.last_payment_error?.message || "Échec inconnu",
-      transactionId: invoice.payment_intent || invoice.id,
-      invoiceId: invoice.id,
-    });
+    const result = await SubscriptionIntegrationService.recordPaymentFailure(
+      userId,
+      {
+        amount: invoice.amount_due / 100,
+        currency: invoice.currency,
+        failureReason: invoice.last_payment_error?.message || "Échec inconnu",
+        transactionId: invoice.payment_intent || invoice.id,
+        invoiceId: invoice.id,
+      }
+    );
 
     try {
       const User = require("../models/User");
@@ -272,11 +319,14 @@ class WebhookController {
         await NotificationService.sendPaymentFailed(user.email, {
           amount: invoice.amount_due / 100,
           failureReason: invoice.last_payment_error?.message || "Échec inconnu",
-          nextAttempt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000), // +3 jours
+          nextAttempt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
         });
       }
     } catch (notificationError) {
-      logger.warn("⚠️ Erreur notification échec paiement:", notificationError.message);
+      logger.warn(
+        "⚠️ Erreur notification échec paiement:",
+        notificationError.message
+      );
     }
 
     return result;

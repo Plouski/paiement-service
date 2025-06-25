@@ -13,7 +13,13 @@ router.get("/current", subscriptionController.getCurrentSubscription);
 // Récupérer l'abonnement d'un utilisateur spécifique (admin ou soi-même)
 router.get("/user/:userId", subscriptionController.getUserSubscription);
 
-// Annuler l’abonnement (fin de période)
+// Vérifier l'éligibilité au remboursement
+router.get("/refund/eligibility", subscriptionController.checkRefundEligibility);
+
+// Demander un remboursement immédiat
+router.post("/refund", subscriptionController.requestRefund);
+
+// Annuler l'abonnement (fin de période)
 router.delete("/cancel", subscriptionController.cancel);
 
 // Réactiver un abonnement annulé (si éligible)

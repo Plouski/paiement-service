@@ -1,4 +1,4 @@
-const subscriptionIntegrationService = require("../services/subscriptionIntegrationService.js");
+const SubscriptionIntegrationService = require("../services/subscriptionIntegrationService.js");
 const Stripe = require("stripe");
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const { logger } = require("../utils/logger");
@@ -14,7 +14,7 @@ class subscriptionController {
           .json({ message: "Utilisateur non authentifié." });
 
       const subscription =
-        await subscriptionIntegrationService.getCurrentSubscription(userId);
+        await SubscriptionIntegrationService.getCurrentSubscription(userId);
 
       if (!subscription) {
         return res
@@ -40,7 +40,7 @@ class subscriptionController {
 
     try {
       const subscription =
-        await subscriptionIntegrationService.getCurrentSubscription(userId);
+        await SubscriptionIntegrationService.getCurrentSubscription(userId);
 
       if (!subscription) {
         return res
@@ -62,10 +62,10 @@ class subscriptionController {
       if (!userId)
         return res.status(401).json({ error: "Utilisateur non authentifié" });
 
-      logger.info("[🔚] Demande d'annulation pour l'utilisateur ${userId}");
+      logger.info(`[🔚] Demande d'annulation pour l'utilisateur ${userId}`);
 
       const result =
-        await subscriptionIntegrationService.cancelSubscriptionAtPeriodEnd(
+        await SubscriptionIntegrationService.cancelSubscriptionAtPeriodEnd(
           userId
         );
 
@@ -84,7 +84,7 @@ class subscriptionController {
             }
           );
           logger.info(
-            "[📧] Notification d'annulation programmée envoyée à ${user.email}"
+            `[📧] Notification d'annulation programmée envoyée à ${user.email}`
           );
         }
       } catch (notificationError) {
@@ -97,8 +97,11 @@ class subscriptionController {
       res.json({
         success: true,
         subscription: result,
-        message:
-          "Abonnement programmé pour annulation le ${result.endDate ? new Date(result.endDate).toLocaleDateString('fr-FR') : 'fin de période'}. Vous gardez vos avantages jusqu'à cette date.",
+        message: `Abonnement programmé pour annulation le ${
+          result.endDate
+            ? new Date(result.endDate).toLocaleDateString("fr-FR")
+            : "fin de période"
+        }. Vous gardez vos avantages jusqu'à cette date.`,
         cancelationType: "end_of_period",
       });
     } catch (err) {
@@ -117,10 +120,10 @@ class subscriptionController {
       if (!userId)
         return res.status(401).json({ error: "Utilisateur non authentifié" });
 
-      logger.info("[🔄] Demande de réactivation pour l'utilisateur ${userId}");
+      logger.info(`[🔄] Demande de réactivation pour l'utilisateur ${userId}`);
 
       const result =
-        await subscriptionIntegrationService.reactivateSubscription(userId);
+        await SubscriptionIntegrationService.reactivateSubscription(userId);
 
       res.json({
         success: true,
@@ -153,10 +156,10 @@ class subscriptionController {
       }
 
       logger.info(
-        "[🔄] Demande de changement de plan pour l'utilisateur ${userId} vers ${newPlan}"
+        `[🔄] Demande de changement de plan pour l'utilisateur ${userId} vers ${newPlan}`
       );
 
-      const result = await subscriptionIntegrationService.changePlan(
+      const result = await SubscriptionIntegrationService.changePlan(
         userId,
         newPlan
       );
@@ -164,8 +167,7 @@ class subscriptionController {
       res.json({
         success: true,
         subscription: result.subscription,
-        message:
-          "Plan changé avec succès de ${result.oldPlan} vers ${result.newPlan}",
+        message: `Plan changé avec succès de ${result.oldPlan} vers ${result.newPlan}`,
         oldPlan: result.oldPlan,
         newPlan: result.newPlan,
         prorationAmount: result.prorationAmount,
@@ -239,6 +241,223 @@ class subscriptionController {
       res
         .status(500)
         .json({ error: "Erreur lors de la création de la session Stripe" });
+    }
+  }
+
+  // Vérifier l'éligibilité au remboursement
+  static async checkRefundEligibility(req, res) {
+    try {
+      const userId = req.user?.userId || req.user?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "Utilisateur non authentifié" });
+      }
+
+      logger.info(
+        `[💰] Vérification éligibilité remboursement pour l'utilisateur ${userId}`
+      );
+
+      const subscription =
+        await SubscriptionIntegrationService.getCurrentSubscription(userId);
+
+      if (!subscription) {
+        return res.status(404).json({
+          eligible: false,
+          reason: "Aucun abonnement trouvé",
+        });
+      }
+
+      const now = new Date();
+      let subscriptionStartDate = null;
+      let daysSinceStart = 0;
+
+      if (subscription.startDate) {
+        subscriptionStartDate = new Date(subscription.startDate);
+
+        if (!isNaN(subscriptionStartDate.getTime())) {
+          const timeDiff = now.getTime() - subscriptionStartDate.getTime();
+          daysSinceStart = Math.floor(timeDiff / (1000 * 60 * 60 * 24));
+        } else {
+          logger.warn("[⚠️] Date de début d'abonnement invalide", {
+            startDate: subscription.startDate,
+            userId,
+          });
+          if (subscription.createdAt) {
+            subscriptionStartDate = new Date(subscription.createdAt);
+            if (!isNaN(subscriptionStartDate.getTime())) {
+              const timeDiff = now.getTime() - subscriptionStartDate.getTime();
+              daysSinceStart = Math.floor(timeDiff / (1000 * 60 * 60 * 24));
+            }
+          }
+        }
+      } else {
+        logger.warn("[⚠️] Aucune date de début trouvée", { userId });
+        if (subscription.createdAt) {
+          subscriptionStartDate = new Date(subscription.createdAt);
+          if (!isNaN(subscriptionStartDate.getTime())) {
+            const timeDiff = now.getTime() - subscriptionStartDate.getTime();
+            daysSinceStart = Math.floor(timeDiff / (1000 * 60 * 60 * 24));
+          }
+        }
+      }
+
+      const maxRefundDays = 7;
+      const daysRemainingForRefund = Math.max(
+        0,
+        maxRefundDays - daysSinceStart
+      );
+
+      const isEligible =
+        daysSinceStart <= maxRefundDays &&
+        subscription.status === "active" &&
+        daysSinceStart >= 0;
+
+      let reason = "";
+      if (!isEligible) {
+        if (daysSinceStart > maxRefundDays) {
+          reason = `Période de remboursement expirée (${maxRefundDays} jours maximum)`;
+        } else if (subscription.status !== "active") {
+          reason = "Abonnement non actif";
+        } else if (daysSinceStart < 0) {
+          reason = "Erreur de calcul de date";
+        }
+      } else {
+        reason = `Éligible au remboursement. Il vous reste ${daysRemainingForRefund} jour(s)`;
+      }
+
+      logger.info(`[💰] Éligibilité remboursement calculée`, {
+        userId,
+        eligible: isEligible,
+        daysSinceStart,
+        daysRemainingForRefund,
+        subscriptionStatus: subscription.status,
+        startDate: subscriptionStartDate,
+        reason,
+      });
+
+      res.json({
+        eligible: isEligible,
+        daysSinceStart,
+        daysRemainingForRefund,
+        maxRefundDays,
+        subscriptionStatus: subscription.status,
+        startDate: subscriptionStartDate,
+        reason,
+      });
+    } catch (error) {
+      logger.error("❌ Erreur vérification éligibilité remboursement:", error);
+      res.status(500).json({
+        error: "Erreur lors de la vérification d'éligibilité",
+        details: error.message,
+      });
+    }
+  }
+
+  // Demander un remboursement immédiat
+  static async requestRefund(req, res) {
+    try {
+      const userId = req.user?.userId || req.user?.id;
+      const { reason = "" } = req.body;
+
+      if (!userId) {
+        return res.status(401).json({ error: "Utilisateur non authentifié" });
+      }
+
+      logger.info(
+        `[💰] Demande de remboursement pour l'utilisateur ${userId}`,
+        { reason }
+      );
+
+      const subscription =
+        await SubscriptionIntegrationService.getCurrentSubscription(userId);
+
+      if (!subscription) {
+        return res.status(404).json({
+          error: "Aucun abonnement trouvé",
+        });
+      }
+
+      if (subscription.status !== "active") {
+        return res.status(400).json({
+          error: "Seuls les abonnements actifs peuvent être remboursés",
+        });
+      }
+
+      const now = new Date();
+      let subscriptionStartDate = null;
+      let daysSinceStart = 0;
+
+      if (subscription.startDate) {
+        subscriptionStartDate = new Date(subscription.startDate);
+        if (!isNaN(subscriptionStartDate.getTime())) {
+          const timeDiff = now.getTime() - subscriptionStartDate.getTime();
+          daysSinceStart = Math.floor(timeDiff / (1000 * 60 * 60 * 24));
+        }
+      }
+
+      const maxRefundDays = 7;
+      const isEligible =
+        daysSinceStart <= maxRefundDays && subscription.status === "active";
+
+      if (!isEligible) {
+        const reason =
+          daysSinceStart > maxRefundDays
+            ? `Période de remboursement expirée (${maxRefundDays} jours maximum)`
+            : "Abonnement non éligible";
+
+        return res.status(400).json({
+          error: "Remboursement non autorisé",
+          reason,
+        });
+      }
+
+      let refundAmount = 0;
+      if (subscription.plan === "monthly") {
+        refundAmount = 5;
+      } else if (subscription.plan === "annual") {
+        refundAmount = 45;
+      }
+
+      logger.info(`[💰] Remboursement éligible`, {
+        userId,
+        plan: subscription.plan,
+        refundAmount,
+        daysSinceStart,
+      });
+
+      const updatedSubscription =
+        await SubscriptionIntegrationService.updateSubscription(userId, {
+          status: "canceled",
+          isActive: false,
+          cancelationType: "immediate",
+          endDate: new Date(),
+          updateUserRole: true,
+        });
+
+      logger.info(`[💰] Remboursement traité avec succès`, {
+        userId,
+        refundAmount,
+        plan: subscription.plan,
+        reason,
+      });
+
+      res.json({
+        success: true,
+        message: "Remboursement demandé avec succès",
+        refund: {
+          amount: refundAmount,
+          currency: "EUR",
+          processingTime: "3-5 jours ouvrés",
+          plan: subscription.plan,
+          reason: reason || "Demande client",
+        },
+        subscription: updatedSubscription,
+      });
+    } catch (error) {
+      logger.error("❌ Erreur demande remboursement:", error);
+      res.status(500).json({
+        error: "Erreur lors de la demande de remboursement",
+        details: error.message,
+      });
     }
   }
 }
