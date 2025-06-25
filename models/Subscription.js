@@ -137,44 +137,4 @@ SubscriptionSchema.methods.getDaysRemaining = function () {
   return Math.max(0, diffDays);
 };
 
-// Peut être réactivé ?
-SubscriptionSchema.methods.canBeReactivated = function () {
-  return (
-    this.status === "canceled" &&
-    this.isActive &&
-    this.cancelationType === "end_of_period" &&
-    this.endDate &&
-    new Date() < this.endDate
-  );
-};
-
-// Éligible au remboursement ?
-SubscriptionSchema.methods.isEligibleForRefund = function () {
-  if (!this.lastPaymentDate) return false;
-
-  const daysSincePayment = Math.floor(
-    (Date.now() - this.lastPaymentDate.getTime()) / (1000 * 60 * 60 * 24)
-  );
-
-  return daysSincePayment <= 30 && this.refundStatus === "none";
-};
-
-// Nettoyer les abonnements expirés
-SubscriptionSchema.statics.cleanupExpired = async function () {
-  const now = new Date();
-
-  const result = await this.updateMany(
-    {
-      status: "canceled",
-      isActive: true,
-      endDate: { $lte: now },
-    },
-    {
-      $set: { isActive: false },
-    }
-  );
-
-  return result.modifiedCount;
-};
-
 module.exports = mongoose.model("Subscription", SubscriptionSchema);
